@@ -1,0 +1,14 @@
+---
+import type { CollectionEntry } from 'astro:content';
+import { copy, type Language } from '../data/site';
+import { formatDate, postUrl, readingTime } from '../lib/posts';
+import Icon from './Icon.astro';
+const { post, lang } = Astro.props as { post: CollectionEntry<'blog'>; lang: Language };
+const t = copy[lang];
+---
+<article class="post-card" data-post data-tags={JSON.stringify(post.data.tags)} data-search={`${post.data.title} ${post.data.description} ${post.data.tags.join(' ')} ${post.body ?? ''}`.toLocaleLowerCase()}>
+  <div class="post-meta"><time datetime={post.data.date.toISOString()}>{formatDate(post.data.date, lang)}</time><span>{readingTime(post.body)} {t.minutes}</span>{post.data.draft && <span class="draft">{t.draft}</span>}</div>
+  <a class="post-title" href={postUrl(post)}><h2>{post.data.title}</h2><Icon name="diagonal" /></a>
+  <p>{post.data.description}</p>
+  <div class="post-tags">{post.data.tags.map((tag) => <span>{tag}</span>)}</div>
+</article>

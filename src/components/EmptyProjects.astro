@@ -1,0 +1,10 @@
+---
+import { copy, type Language } from '../data/site';
+const { lang } = Astro.props as { lang: Language };
+const t = copy[lang];
+---
+<div class="empty-projects">
+  <div class="project-orbit" aria-hidden="true"><span></span><span></span><span></span><i>✳</i></div>
+  <div class="project-empty-copy"><span class="eyebrow">{t.emptyProjectsLabel}</span><h3>{t.emptyProjects}</h3><p>{t.emptyProjectsBody}</p></div>
+  <span class="project-mark" aria-hidden="true">[ + ]</span>
+</div>

@@ -1,0 +1,12 @@
+---
+import Base from '../../layouts/Base.astro';
+import EmptyProjects from '../../components/EmptyProjects.astro';
+import { copy, languagePaths, type Language } from '../../data/site';
+export const getStaticPaths = languagePaths;
+const lang = Astro.params.lang as Language;
+const t = copy[lang];
+---
+<Base lang={lang} title={t.nav.projects} active="projects">
+  <section class="page-heading shell"><p class="section-index">{t.projectsEyebrow}</p><h1>{t.projectsTitle}</h1><p>{t.projectsIntro}</p></section>
+  <section class="shell standalone-empty"><EmptyProjects lang={lang} /></section>
+</Base>

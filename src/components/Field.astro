@@ -1,0 +1,37 @@
+---
+import { copy, type Language } from '../data/site';
+const { lang = 'en', compact = false } = Astro.props as { lang?: Language; compact?: boolean };
+const t = copy[lang];
+// A deterministic torus illustration, generated as lightweight SVG geometry.
+function project(u: number, v: number) {
+  const r = 110 + 44 * Math.cos(v);
+  const x = r * Math.cos(u);
+  const y = r * Math.sin(u);
+  const z = 44 * Math.sin(v);
+  const tilt = 0.92;
+  const py = y * Math.cos(tilt) - z * Math.sin(tilt);
+  const px = x;
+  const spin = -0.48;
+  return `${(240 + px * Math.cos(spin) - py * Math.sin(spin)).toFixed(2)},${(210 + px * Math.sin(spin) + py * Math.cos(spin)).toFixed(2)}`;
+}
+const rings = Array.from({ length: 42 }, (_, i) => Array.from({ length: 81 }, (_, j) => project(i / 42 * Math.PI * 2, j / 80 * Math.PI * 2)).join(' '));
+const parallels = Array.from({ length: 16 }, (_, i) => Array.from({ length: 121 }, (_, j) => project(j / 120 * Math.PI * 2, i / 16 * Math.PI * 2)).join(' '));
+---
+<figure class:list={['field', { compact }]} aria-label={lang === 'zh' ? '青柠绿色的环形线框艺术图' : 'A lime-green toroidal wireframe illustration'}>
+  <div class="field-top"><span>{t.field}</span><span class="field-cross">+</span></div>
+  <svg class="field-art" viewBox="0 0 480 420" fill="none" aria-hidden="true">
+    <defs>
+      <pattern id={compact ? 'grid-small' : 'grid'} width="32" height="32" patternUnits="userSpaceOnUse"><path d="M32 0H0V32" stroke="#373b32" stroke-width=".5" /></pattern>
+      <radialGradient id={compact ? 'glow-small' : 'glow'}><stop stop-color="#c9e66b" stop-opacity=".10" /><stop offset="1" stop-color="#c9e66b" stop-opacity="0" /></radialGradient>
+    </defs>
+    <rect width="480" height="420" fill={`url(#${compact ? 'grid-small' : 'grid'})`} />
+    <circle cx="240" cy="210" r="188" fill={`url(#${compact ? 'glow-small' : 'glow'})`} />
+    <g class="wireframe" stroke="#d5ed83" stroke-width=".85">
+      {rings.map((points) => <polyline points={points} opacity=".82" />)}
+      {parallels.map((points) => <polyline points={points} opacity=".45" />)}
+    </g>
+    <path d="M31 210h12m-6-6v12M438 210h12m-6-6v12" stroke="#727966" />
+    <circle cx="240" cy="210" r="3" fill="#d5ed83" />
+  </svg>
+  <figcaption><span>{t.figureCaption}</span><span aria-hidden="true">↗</span></figcaption>
+</figure>

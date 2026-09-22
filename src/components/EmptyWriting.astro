@@ -1,0 +1,9 @@
+---
+import { copy, type Language } from '../data/site';
+const { lang } = Astro.props as { lang: Language };
+const t = copy[lang];
+---
+<div class="empty-writing">
+  <div class="notebook-illustration" aria-hidden="true"><div class="paper"><span></span><span></span><span></span><i>✳</i></div><div class="pencil"></div></div>
+  <div><span class="eyebrow">{t.emptyWritingLabel}</span><h3>{t.emptyWriting}</h3><p>{t.emptyWritingBody}</p></div>
+</div>

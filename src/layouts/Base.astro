@@ -1,0 +1,82 @@
+---
+import { copy, site, type Language } from '../data/site';
+import Icon from '../components/Icon.astro';
+import '../styles/global.css';
+
+interface Props {
+  lang: Language;
+  title?: string;
+  description?: string;
+  active?: 'home' | 'blog' | 'projects' | 'about';
+  alternate?: string;
+  translationAvailable?: boolean;
+  noindex?: boolean;
+  articleDate?: Date;
+}
+const { lang, title, description = copy[lang].description, active = 'home', alternate, translationAvailable = true, noindex = false, articleDate } = Astro.props;
+const t = copy[lang];
+const other = lang === 'en' ? 'zh' : 'en';
+const alternateUrl = alternate ?? Astro.url.pathname.replace(`/${lang}/`, `/${other}/`);
+const canonical = new URL(Astro.url.pathname, site.url);
+const pageTitle = title ? `${title} — ${site.name}` : t.title;
+const nav = (['home', 'blog', 'projects', 'about'] as const).map((key) => ({ key, href: `/${lang}/${key === 'home' ? '' : `${key}/`}`, label: t.nav[key] }));
+---
+<!doctype html>
+<html lang={t.htmlLang}>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f7f7f0" />
+    <title>{pageTitle}</title>
+    <meta name="description" content={description} />
+    <meta name="author" content={site.name} />
+    {noindex && <meta name="robots" content="noindex, nofollow" />}
+    <link rel="canonical" href={canonical} />
+    <link rel="alternate" hreflang={t.htmlLang} href={canonical} />
+    {translationAvailable && <link rel="alternate" hreflang={copy[other].htmlLang} href={new URL(alternateUrl, site.url)} />}
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="alternate" type="application/rss+xml" title={`${site.name} · ${t.nav.blog}`} href={`/${lang}/rss.xml`} />
+    <meta property="og:type" content={articleDate ? 'article' : 'website'} />
+    <meta property="og:title" content={pageTitle} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:site_name" content="Cyrus" />
+    <meta property="og:locale" content={t.locale} />
+    {articleDate && <meta property="article:published_time" content={articleDate.toISOString()} />}
+    <meta name="twitter:card" content="summary" />
+  </head>
+  <body id="top">
+    <a class="skip-link" href="#main">{t.skip}</a>
+    <header class="site-header shell">
+      <a class="wordmark" href={`/${lang}/`} aria-label="Cyrus"><span class="brand-symbol" aria-hidden="true">✳</span>cyrus<span class="brand-dot">.</span></a>
+      <nav class="desktop-nav" aria-label={lang === 'zh' ? '主导航' : 'Main navigation'}>
+        {nav.map((item) => <a href={item.href} aria-current={active === item.key ? 'page' : undefined}>{item.label}</a>)}
+      </nav>
+      <div class="header-actions">
+        <a class="language-switch" href={alternateUrl} lang={copy[other].htmlLang} aria-label={t.language}>{t.languageLabel}<span aria-hidden="true">↗</span></a>
+        <a class="github-icon" href={site.github} aria-label="GitHub"><Icon name="github" size={19} /></a>
+        <button class="menu-button" aria-label={t.menu} aria-expanded="false" aria-controls="mobile-nav"><Icon name="menu" /></button>
+      </div>
+    </header>
+    <nav id="mobile-nav" class="mobile-nav shell" hidden aria-label={lang === 'zh' ? '移动端导航' : 'Mobile navigation'}>
+      {nav.map((item) => <a href={item.href} aria-current={active === item.key ? 'page' : undefined}>{item.label}<Icon /></a>)}
+    </nav>
+    <main id="main"><slot /></main>
+    <footer class="site-footer shell">
+      <div class="footer-top"><a class="wordmark" href={`/${lang}/`}>cyrus<span class="brand-dot">.</span></a><p>{t.footerLine}</p><a class="back-top" href="#top">{t.backTop}<span aria-hidden="true">↑</span></a></div>
+      <div class="footer-bottom"><span>© {new Date().getFullYear()} Cyrus</span><span>{t.school}</span><div><a href={site.github}>GitHub <span aria-hidden="true">↗</span></a><a href={`/${lang}/rss.xml`}>RSS <span aria-hidden="true">↗</span></a></div></div>
+    </footer>
+    <script>
+      const menu = document.querySelector<HTMLButtonElement>('.menu-button');
+      const nav = document.querySelector<HTMLElement>('#mobile-nav');
+      function closeMenu() { menu?.setAttribute('aria-expanded', 'false'); if (nav) nav.hidden = true; }
+      menu?.addEventListener('click', () => {
+        const expanded = menu.getAttribute('aria-expanded') !== 'true';
+        menu.setAttribute('aria-expanded', String(expanded));
+        if (nav) nav.hidden = !expanded;
+      });
+      document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && menu?.getAttribute('aria-expanded') === 'true') { closeMenu(); menu.focus(); } });
+      window.matchMedia('(min-width: 761px)').addEventListener('change', (event) => { if (event.matches) closeMenu(); });
+    </script>
+  </body>
+</html>

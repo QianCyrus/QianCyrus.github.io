@@ -1,0 +1,19 @@
+---
+import Base from '../../layouts/Base.astro';
+import Field from '../../components/Field.astro';
+import Icon from '../../components/Icon.astro';
+import { copy, site, languagePaths, type Language } from '../../data/site';
+export const getStaticPaths = languagePaths;
+const lang = Astro.params.lang as Language;
+const t = copy[lang];
+---
+<Base lang={lang} title={t.nav.about} active="about">
+  <section class="page-heading shell"><p class="section-index">{t.aboutEyebrow}</p><h1>{t.aboutTitle}</h1></section>
+  <section class="about-grid shell">
+    <div class="about-visual"><Field lang={lang} compact /><span class="about-visual-note">CYRUS / {lang === 'zh' ? '保持好奇' : 'STAY CURIOUS'}</span></div>
+    <div class="about-copy"><h2>{t.aboutHello}</h2><p class="about-lead">{t.aboutText}</p><p>{t.aboutSecond}</p>
+      <dl class="profile-details"><div><dt>{t.affiliationLabel}</dt><dd>{t.school}</dd></div><div><dt>{t.researchLabel}</dt><dd>{t.research}</dd></div><div><dt>{t.elsewhere}</dt><dd><a class="text-link" href={site.github}>{t.githubLabel}<Icon name="diagonal" size={18} /></a></dd></div></dl>
+    </div>
+  </section>
+  <div class="about-closing shell"><span aria-hidden="true">✳</span><p>{t.aboutQuote}</p></div>
+</Base>

@@ -1,0 +1,35 @@
+---
+import Base from '../../layouts/Base.astro';
+import Field from '../../components/Field.astro';
+import Icon from '../../components/Icon.astro';
+import EmptyWriting from '../../components/EmptyWriting.astro';
+import EmptyProjects from '../../components/EmptyProjects.astro';
+import PostCard from '../../components/PostCard.astro';
+import { copy, languagePaths, type Language } from '../../data/site';
+import { getPosts } from '../../lib/posts';
+export const getStaticPaths = languagePaths;
+const lang = Astro.params.lang as Language;
+const t = copy[lang];
+const posts = (await getPosts(lang)).slice(0, 3);
+---
+<Base lang={lang} active="home">
+  <section class="hero shell">
+    <div class="hero-copy">
+      <div class="hero-eyebrow"><span class="status-dot"></span><span>{t.eyebrow}</span></div>
+      <p class="hello">{t.hello}</p>
+      <h1>{t.headline[0]}<br /><span class="headline-last">{t.headline[1]}<svg viewBox="0 0 380 15" preserveAspectRatio="none" aria-hidden="true"><path d="M3 10Q175-2 377 7" fill="none" stroke="currentColor" stroke-width="8" /></svg></span></h1>
+      <p class="hero-intro">{t.intro}</p>
+      <div class="hero-buttons"><a class="button" href={`/${lang}/about/`}>{t.primary}<Icon name="diagonal" size={18} /></a><a class="text-link" href={`/${lang}/projects/`}>{t.secondary}<Icon size={18} /></a></div>
+    </div>
+    <div class="hero-visual"><Field lang={lang} /><div class="visual-note"><span aria-hidden="true">↳</span><span>LATENCY ↓ &nbsp; / &nbsp; POSSIBILITY ↑</span><span class="note-line"></span></div></div>
+  </section>
+  <div class="identity-strip shell"><div><span class="eyebrow">{t.locationLabel}</span><span>{t.school}</span></div><div><span class="eyebrow">{t.focusLabel}</span><span>{t.research}</span></div><a href="#notebook">{t.scroll}<span aria-hidden="true">↓</span></a></div>
+  <section class="content-section shell" id="notebook">
+    <div class="section-heading"><div><p class="section-index">01 / {lang === 'zh' ? '文字' : 'WRITING'}</p><h2>{t.latest}</h2><p>{t.latestSub}</p></div><a class="text-link" href={`/${lang}/blog/`}>{t.allWriting}<Icon size={18} /></a></div>
+    {posts.length ? <div class="post-list">{posts.map((post) => <PostCard post={post} lang={lang} />)}</div> : <EmptyWriting lang={lang} />}
+  </section>
+  <section class="content-section projects-section shell">
+    <div class="section-heading"><div><p class="section-index">02 / {lang === 'zh' ? '项目' : 'PROJECTS'}</p><h2>{t.work}</h2><p>{t.workSub}</p></div><a class="text-link" href={`/${lang}/projects/`}>{t.allProjects}<Icon size={18} /></a></div>
+    <EmptyProjects lang={lang} />
+  </section>
+</Base>
