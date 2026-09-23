@@ -1,6 +1,6 @@
 ---
-title: "My_Sglang（一）：从一条请求看懂推理引擎的整体架构"
-description: "以 Qwen3.5 的单卡文本推理为例，沿一条请求梳理 My_Sglang 的进程划分、调度循环、模型执行与混合状态管理，并说明当前实现和实验结果的边界。"
+title: "My_Sglang（一）：推理引擎的模块边界、执行循环与状态管理"
+description: "从模块契约与状态所有权出发，解析 My_Sglang 的调度循环、Paged KV 与 Radix Cache、CUDA 执行依赖，以及 MTP 如何扩展生成与提交路径。"
 date: 2026-09-23T17:50:00Z
 lang: zh
 translationKey: my-sglang-01-architecture
@@ -8,125 +8,168 @@ tags: [LLM 推理, 系统架构, My_Sglang]
 draft: false
 ---
 
-客户端发来一句话，模型返回一段文字。这个接口很简单，服务内部却需要持续协调几件事：把文本转成 token，为请求分配资源，决定下一轮运行哪些请求，执行模型，保存生成状态，再把结果及时送回客户端。
+推理引擎的架构，最终要回答三个相互约束的问题：**这一轮执行哪些 token，执行依赖哪些状态，结果何时可以成为下一轮的输入。** 连续批处理改变第一项，KV Cache 管理约束第二项，CUDA Graph、overlap 与投机解码则不断调整第三项的边界。
 
-当多个请求同时进入系统，有人提交长提示词，有人正在等待下一个 token，还有人中途关闭连接，这些环节便共同决定了服务的正确性和性能。理解推理引擎，可以先跟着一条请求走完整个过程，再看每项优化改变了哪一段。
+My_Sglang 基于 mini-sglang，保留其服务、调度、执行与缓存管理骨架，在此基础上探索模型适配、混合调度、原生 MTP 和算子优化。本文以代码提交 `566bf693` 为观察点，建立这些模块之间的联系。重点放在数据结构、资源所有权和执行顺序；模型适配与性能实验留到后续章节。
 
-这是 My_Sglang 系列的第一篇。本文以实验代码提交 `566bf693` 为观察点，介绍整体架构；后续文章再展开模型、状态管理、调度与算子的实现。
+## 1. 系统边界：服务协议、调度决策与设备执行
 
-## 1. 项目从哪里开始
+My_Sglang 沿用 mini-sglang 的进程组织。HTTP 前端负责连接、请求参数与响应；tokenizer/detokenizer 负责文本和 token 序列的转换；scheduler 维护等待与运行集合，并在自己的进程中持有 Engine。Engine、模型和采样器都是该进程内的对象，GPU 承载由它们提交的计算与张量存储。
 
-My_Sglang 是基于 **mini-sglang 的实验分支**。选择这个起点，是因为它保留了现代推理服务的主要组成部分，同时让请求如何流动、批次如何构造、GPU 如何被驱动仍然容易追踪。
+进程数量随 tokenizer 配置和 TP 配置变化。下图以单卡、共享 tokenizer/detokenizer 工作进程为例，展示模块关系；它并不把某个部署拓扑固定为项目的唯一架构。
 
-HTTP 服务、tokenizer、连续批处理、Chunked Prefill、Radix Cache、普通解码 CUDA Graph 和 CPU/GPU overlap，都是 mini-sglang 已有的基础。本项目围绕 Qwen3.5 的混合模型与原生 MTP 扩展这些执行路径，并增加混合状态管理、调度适配、服务生命周期检查和可选择的 GPU 融合算子。
+<my-sglang-explorer view="architecture">
+<p>HTTP 前端与 tokenizer/detokenizer 通过消息连接 scheduler。scheduler 在进程内调用 Engine、模型与采样器；Engine 驱动 GPU。请求槽、页表、缓存索引和物理张量分别由对应模块管理，结果经 detokenizer 返回前端。</p>
+</my-sglang-explorer>
 
-本轮范围限定为单张 RTX 5090、Qwen3.5-4B BF16、TP=1 和文本输入输出。这样可以集中观察单卡内部的执行成本与状态变化。多卡通信、视觉输入和量化不在本轮验收范围内。
+这几个边界传递的信息不同。进程间消息携带 UID、token IDs、采样参数、结束标记和计数；scheduler 与 Engine 之间传递 `Batch`、采样参数和映射；模型与 Attention backend 之间共享当前执行的元数据及设备状态。完整 hidden states 和 logits 留在执行侧，不经 HTTP 消息通道往返。
 
-精简架构也意味着有所取舍：先保留容易核对的通用实现，测出瓶颈，再逐项加入优化。一个功能有代码、一个短用例通过、一个负载变快，分别代表不同程度的进展。
-
-## 2. 先分清进程、对象和 GPU
-
-当前混合模型 HTTP 配置使用三个主要 CPU 进程：前端进程接收请求；共享 tokenizer/detokenizer 进程处理文本与 token；scheduler 进程管理队列，并持有执行模型的 Engine 对象。**Engine 与 scheduler 位于同一个进程，GPU 也不是一个额外的 Python 进程。**
-
-前端负责参数检查、请求标识、HTTP 连接与 SSE 输出。共享 tokenizer/detokenizer 进程既编码输入，也解码输出，并维护相应的 token 计数。这就是当前配置要求 `num_tokenizer=0` 的含义：共享同一个工作进程，并非关闭分词。
-
-scheduler 决定每轮处理哪些请求；Engine 负责准备和执行 GPU 工作，持有模型、采样器、CUDA stream 等对象。GPU 上则是模型权重、请求状态和实际执行的矩阵、Attention、GDN 等算子。CPU 进程之间通过 ZeroMQ 交换消息，Engine 通过 CUDA 驱动设备计算。
-
-下面的交互图可以查看各模块的职责与联系。即使不使用交互，也可以沿这条路径阅读：**客户端 → HTTP 前端 → 共享 tokenizer → scheduler 内的 Engine → GPU；结果再经 detokenizer 和前端返回客户端。**
-
-<my-sglang-explorer view="architecture"><p>HTTP 前端 → 共享 tokenizer/detokenizer 进程 → scheduler 进程内的 Engine 与模型 → GPU 计算；生成结果沿 detokenizer 与前端返回客户端。</p></my-sglang-explorer>
-
-这里的分工把服务协议、执行决策和模型计算各自收在明确的边界内。增加一种模型时，HTTP 前端无需了解它的每层计算；调整调度策略时，也不必重写分词逻辑。
-
-## 3. 三个贯穿执行路径的对象
-
-沿源码阅读时，`core.py` 中的 `Req`、`Batch` 和 `Context` 是很好的入口。它们分别描述一条请求、一轮执行和执行所需的上下文。
-
-| 对象 | 它回答的问题 | 主要内容 |
+| 模块 | 拥有的状态与决策 | 向下一层提供的契约 |
 | --- | --- | --- |
-| `Req` | 这条请求进行到了哪里？ | 请求 UID、CPU token 序列、请求槽、已计算长度和输出预算 |
-| `Batch` | 这一轮准备运行什么？ | 请求集合、展平后的输入 token、位置和执行元数据 |
-| `Context` | 模型执行时从哪里取得这些信息？ | 当前 batch、页表、后端及相关资源的引用 |
+| 服务与分词 | 连接、文本编解码、请求 UID | token 请求、取消消息；接收结果与结束原因 |
+| Scheduler | pending/running 集合、准入、批次组成 | 本轮请求集合、输入区间、位置与写回位置 |
+| 资源管理 | 请求槽、空闲页、前缀索引及锁定关系 | 可用容量、逻辑位置到物理位置的映射 |
+| Engine | 模型、backend、采样器、CUDA stream、Graph runner | GPU token、主机 token 副本及完成事件 |
+| 模型与 kernel | 权重、层计算、模型专属状态 | logits；在约定的输入前缀上推进状态 |
 
-例如，`cached_len` 描述请求已经计算到的位置，`extend_len` 描述本轮还要推进多少 token。prefill 往往推进一段输入，普通 decode 通常推进一个 token。模型使用同一套长度信息与调度器对齐状态。
+HTTP、连续批处理、Chunked Prefill、Paged KV、Radix Cache、普通 decode Graph 和 overlap 来自上游基础。本分支的工作主要落在模型专属状态、原生 MTP、混合调度适配、生命周期处理和可切换算子路径。这一划分也限定了后文的归属：接入已有机制与新增机制应分别讨论。
 
-Batch 的成员会随执行轮次改变：新请求可以进入，结束的请求会退出。连续批处理正是建立在这样的执行循环上。Context 则在一次前向期间提供当前 batch；它不会代替每个请求持有自己的历史状态。
+## 2. 请求身份与三条长度：执行循环的数据模型
 
-## 4. 一条普通请求的完整旅程
+`core.py` 中的 `Req`、`Batch`、`Context` 构成运行时的公共语言。`Req` 跨轮次存活；`Batch` 描述一次调度选择；`Context` 在前向期间暴露当前 batch、页表与 backend，退出前向后清除活动 batch。Context 是执行上下文，不承担全部请求历史。
 
-假设客户端提交一条聊天请求，要求最多生成 128 个 token。前端先检查接口参数并分配 UID，将消息交给 tokenizer。聊天模板应用和编码完成后，scheduler 收到 token IDs、采样参数与请求标识，将其加入等待队列。
+首先要区分三种索引。`uid` 是请求在消息通道中的身份；`table_idx` 是可复用的请求槽，用来索引 token pool 和页表；页表中的值才是物理 KV 的 token 槽地址。请求结束后可以复用 `table_idx`，却不能因此继承旧 UID 的模型状态或迟到结果。
 
-进入队列不等于立即执行。scheduler 还需要检查上下文限制、请求槽和容量预算，并在每一轮选择可运行的工作。如果输入较长，Chunked Prefill 会让它分多轮进入模型；只有读完最后一块输入后，才向客户端提交第一个生成 token。
+其次，`Req` 的长度描述的是执行进度，而非三份相同的 token 计数：
 
-选定请求后，scheduler 构造 Batch，准备位置与映射等元数据，再调用 Engine。Qwen3.5 的原生模型路径执行各层计算，得到 logits，由 GPU 上的 greedy 选择产生下一个 token。这里的 Transformers 模型只用于独立正确性参考，在线执行走的是 mini 的模型和 Engine 路径。
-
-结果准备好后，scheduler 把 token 追加到请求的输出记录，检查 EOS 和输出预算，并把结果发给 detokenizer。前端最终将文字以 JSON 或 SSE 形式返回。只要请求尚未结束，它就会再次参与调度；普通 decode 使用新增 token 和已有状态继续生成。
-
-下面可以逐步查看这条执行路径。文字流程是：**接收与编码 → 排队和准入 → 一轮或多轮 prefill → 首 token → 重复 decode → EOS、长度结束或取消 → 释放资源。**
-
-<my-sglang-explorer view="flow"><p>接收与编码 → 排队和准入 → 分块或整段 prefill → 首 token → 重复 decode → EOS、长度结束或取消 → 后端释放资源。</p></my-sglang-explorer>
-
-生命周期的最后一段同样属于正确性。正常结束时，请求需要退出运行集合，归还请求槽和调度资源，并删除模型状态。取消则沿前端、tokenizer、scheduler 的消息路径传递，后端确认停止后再回收资源；客户端断开连接本身不能证明 GPU 状态已经释放。
-
-状态回收还受 CUDA 执行顺序约束。若上一轮 GPU 工作尚未完成，就把相同请求槽交给新请求，迟到的写入可能污染新任务。因此释放路径必须照顾 stream 之间的依赖，同时识别迟到结果与重复释放。
-
-## 5. 混合模型改变了“缓存”的含义
-
-Qwen3.5 同时包含完整 Attention 和 Gated DeltaNet（GDN）路径。为继续生成，请求除了保存 Attention 的 K/V，还需要保存卷积窗口和循环状态。分块输入、投机验证以及取消回收，都必须让这些状态保持一致。
-
-当前实现中，`Qwen35State` 持有各层的 KV、conv、recurrent 张量和长度信息。模型以 `table_idx` 查找状态，同时核对请求 `uid`：槽位可以复用，但复用后属于另一条请求，不能沿用旧状态。每次前向还检查模型状态长度是否与调度器的 `cached_len` 一致。
-
-这里有一个容易从架构图中误读的细节：**当前 hybrid 路径并没有把真实 KV 存入 mini 原有的 Paged KV 物理池。** Engine 在这条路径上将原有 `kv_cache` 设为 `None`。真正的 K/V 是模型请求状态中的动态 GPU 张量，普通 Attention 通过追加张量延长历史。
-
-调度层仍保留页表、空闲页计数和请求槽，用来做逻辑映射、容量预算及准入控制。因此，“存在页表”不能直接推导为“混合模型已经采用 Paged Attention 存储”。这是当前参考实现的重要边界，也是后续显存优化需要解决的问题。
-
-同样，混合 Prefix Cache 当前未启用。即使两个请求拥有相同文本前缀，只恢复 K/V、遗漏对应的卷积与循环状态，也无法正确继续计算。因此 hybrid 路径使用 naive cache，暂时放弃跨请求前缀复用。
-
-## 6. 后续能力接在架构的什么位置
-
-理解普通执行循环后，MTP、混合调度和 CUDA Graph 就各有落点。
-
-混合调度改变 scheduler 构造 Batch 的方式，让一轮前向容纳等待处理的 prefill token 和正在生成的 decode token。模型的 `forward_packed` 共享投影与 MLP 计算，但 Attention 和循环更新仍按请求切分，维护彼此独立的状态。当前已有这条路径，长短请求的正式 GPU 调度收益仍待验证。
-
-原生 MTP 则在生成循环中增加候选、目标验证和提交。scheduler 的 MTP 适配负责组织请求，`engine/speculative.py` 管理投机流程，模型提供 MTP 层计算。候选只保留验证通过的前缀，并追加目标模型确定的下一个 token；未通过的候选后缀会被丢弃，状态按实际提交路径恢复和推进。因此它同时影响执行、状态管理和服务计数。
-
-CUDA Graph 作用于重复执行路径，overlap 则协调 CPU 调度与 GPU 工作。它们都依赖稳定的执行与状态边界，不能因为上游分别具备这些能力，就宣称新模型的所有组合均可使用。当前 Graph 默认关闭，仅有 B=1、容量 256、math SDPA 的有限实验；MTP+mixed 和 MTP+Graph 显式拒绝，MTP 路径关闭 overlap。
-
-算子融合位于更靠近 GPU 的一层。GDN 与 gated norm 各有独立开关，通用路径作为对照保留。这样可以单独回答一项融合是否改变数值、是否减少热点耗时，以及是否真正缩短模型执行时间。
-
-## 7. 当前进展如何解读
-
-本项目仍在分阶段验收。下面几个结果用于说明进展，完整条件、原始测量和失败记录保存在项目的中文实验文档中。
-
-| 项目 | 当前证据与边界 |
+| 字段 | 执行语义 |
 | --- | --- |
-| 模型接入 | 441 个文本/MTP 权重键严格加载；普通推理已有有限 HF/greedy 对照，更广回归仍需继续 |
-| GDN 融合 | 普通推理 B=1、输入 512、输出 128，三轮平均离线模型生成耗时（prefill + decode）相对通用路径降低 **30.399%**；不代表 HTTP 延迟、所有负载或超过成熟融合后端 |
-| gated norm 融合 | 微基准更快，但已测模型耗时反增约 **1.385%**，保留负结果并默认关闭 |
-| 在线 MTP | 普通和 MTP 各完成 81 个请求；两种模式只有 **55/81** 原始 token 序列严格一致，尚未通过完整正确性与性能验收 |
+| `cached_len` | 本轮输入之前已有计算状态的前缀长度 |
+| `device_len` | 当前设备输入序列的逻辑末端；两者之差是 `extend_len` |
+| `max_device_len` | 该 `Req` 构造时的输入长度加 `output_len`，限定可推进的范围；中间 chunk 使用临时 `Req` |
 
-表中数据摘自已经归档的历史实验，本文写作期间没有重新运行 GPU 测量。[测量摘录与来源哈希](/data/my-sglang/chapter-01-evidence.json)保留了融合实验的三轮原值，以及 MTP 的严格对齐计数。MTP 的这组在线结果发生在后续重放提交修复之前，修复后仍需重新验收。
+普通 decode 开始时通常有 `device_len = cached_len + 1`：最后一个 token 已生成，尚待模型消费。prefill 则可以让 `extend_len` 大于一。一次前向提交后，`complete_one()` 令 `cached_len` 前移到旧的 `device_len`，并把 `device_len` 加一，为新 token 留出位置。
 
-这也解释了为什么实验记录需要和代码一起维护。性能数字只有绑定模型、精度、执行开关、负载和正确性条件，才足以支持一次工程决策。协议成功与资源回收通过，也不能代替模型输出的严格对齐。
+**这些是 CPU 侧的逻辑更新，不能解释成 GPU 已经执行完成。** 采样结果首先写入设备端 token pool，主机端 `input_ids` 要等异步复制完成后才追加。启用 overlap 时，下一轮可以通过设备 token pool 取得输入，而上一轮的主机记录仍在处理中。这种有意保留的进度差，是调度能够覆盖部分 CPU 开销的前提。
 
-## 8. 从整体架构继续深入
+`Batch` 将不同请求的新增区间展平，并携带 `positions`、`out_loc` 和 backend 元数据。展平便于共用一次前向，但请求边界仍由长度和映射保留；计算合批与状态隔离必须同时成立。
 
-阅读代码时，可以从 `server/launch.py` 看进程启动，再沿 `tokenizer/`、`scheduler/` 和 `engine/` 跟踪消息与执行。`models/qwen3_5.py` 展示混合状态如何进入前向，`kernel/qwen35_reference.py` 则提供通用算子起点。实验工具放在 `benchmarks/qwen35/`，记录位于 `docs/experiments/qwen35-sm120/`，与服务执行代码分开维护。
+## 3. 调度循环：prepare、submit、reconcile
 
-本系列计划共十篇。本文建立整体视图，后续依次展开以下主题；尚未发布的文章会随实现与验收进展调整：
+为解释依赖关系，可以把一轮执行分成准备、提交和结果处理三个阶段。下面的英文标签用于描述流程，并不是代码中新增加的三层接口。
 
-2. 请求生命周期与 HTTP 服务；
-3. Qwen3.5 模型与通用算子接入；
-4. KV、卷积与循环状态管理；
-5. Chunked Prefill 与混合调度；
-6. 原生 MTP 的验证与提交；
-7. 从 profile 到算子融合与 SM120 实验；
-8. CUDA Graph 与 CPU/GPU overlap；
-9. 跨 batch 数值分歧的诊断；
-10. Benchmark、正确性与复现证据。
+**Prepare** 负责选择可运行请求、分配必要资源，并构造执行描述。scheduler 从 pending 和 running 集合中选出 Batch，经 CacheManager 分配新增页，生成位置、输入映射与写回映射，再让 Attention backend 准备元数据。输入映射从设备 token pool 提取本轮 token，`out_loc` 则告诉缓存写入操作将新 K/V 放到哪里。
+
+**Submit** 在 Engine stream 上提交模型或 Graph replay，随后采样，得到设备 token 与异步复制到主机的副本。`ForwardOutput` 同时返回完成事件，避免上层把“已经拿到 Python 对象”误当成“数据已经可读”。设备 token 写回后，未完成请求继续进入 decode 集合。
+
+**Reconcile** 等待输出复制完成，更新主机序列，执行 EOS、长度结束与资源释放，再把结果发送到 detokenizer。中间 prefill chunk 不向用户提交生成结果；只有最后一个输入块完成后，请求才转入通常的生成循环。
+
+<my-sglang-explorer view="flow">
+<p>Prepare：准入、选择请求、分配页并构造 Batch。Submit：提交模型计算、采样与设备 token 写回。Reconcile：等待复制事件、提交输出、判断结束并回收资源。未完成请求重新进入下一轮，取消请求沿同一生命周期退出。</p>
+</my-sglang-explorer>
+
+### 批次由预算决定，而非固定的请求列表
+
+连续批处理的关键在于每轮重建 Batch。已经完成的请求退出，新请求满足准入条件后进入；prefill 请求可以跨轮次推进，decode 请求也可以与不同的邻居共同执行。
+
+当前准入同时检查请求槽和缓存容量。`PrefillAdder` 估计未缓存输入加输出预算，并计入运行中 decode 请求的预留量；匹配前缀被锁定后，还会再次检查可用容量。后一次检查很必要：锁定会把原本可驱逐的缓存转为受保护容量，第一次估计可能因此失效。
+
+Chunked Prefill 将单次输入工作限制在 token budget 内。未完成的块以 `ChunkedReq` 保留原请求槽和缓存句柄，回到 pending 集合前部，下一轮从新的 `cached_len` 继续。它限制的是每轮新增计算量，容量准入仍需要考虑请求后续的资源需求。
+
+分支还提供 `prefill_first`、`decode_first` 和 `mixed` 选择，默认仍为 `prefill_first`。mixed 路径先安排 decode，再用剩余 token budget 放入 prefill；存在等待输入时为其保留至少一个 token，decode 超出预算时按 UID 轮转，若 prefill 暂时无法准入，再收回预留预算。其目标是让两类工作都有推进机会，但预算预留不能代替负载下的无饥饿验收，容量约束和实际服务时延仍需独立检查。
+
+核心 `Batch.phase` 仍只有 prefill/decode。mixed batch 通过请求区间及 `batch_mix` 描述内部组成，并进入可处理变长片段的模型路径。增加调度策略因而不仅是改选队顺序，还要求模型和 backend 理解这个执行描述。
+
+## 4. KV Cache：存储、映射与复用分别归谁
+
+普通 Attention 路径把 KV 管理拆成三个层次：`MHAKVCache` 持有物理张量，页表维护请求逻辑位置到设备存储位置的映射，Radix Cache 维护可以复用的 token 前缀。它们共同工作，但生命周期不同。
+
+![普通 Attention 路径的 KV 所有权：请求槽映射至页表，Radix 前缀索引复用物理 token 槽；锁定与驱逐控制页的回收。](/images/my-sglang/kv-ownership.svg)
+
+*图 1：普通 Attention 路径中的映射与所有权示意。颜色表示资源角色，箭头表示引用或回收关系；页号与请求均为示例，不是运行测量。混合模型的独立状态路径见本节末尾。*
+
+### 物理池与页表
+
+Engine 初始化物理池，布局包含 K/V、层、页、页内 token、KV heads 和 head dimension。CacheManager 按页分配，随后把页展开为 token 槽写入页表。因此，代码中的 `page_table[table_idx, position]` 保存的是物理 token 位置，并非未经展开的 page ID。
+
+模型计算出本轮 K/V 后，`store_kv` 根据 `out_loc` 写入物理池，Attention backend 利用请求的历史长度和映射读取已有缓存。模型层无需自行分配一段连续显存来容纳整条历史；调度器也无需操作各层 K/V 的具体数值。
+
+### Radix 索引与引用保护
+
+Radix 节点保存 token 前缀及其物理索引，**不会另存一份完整 K/V**。命中前缀后，新的请求页表可以引用已存在的槽位。节点的 `ref_count` 沿祖先路径增减：有活动请求持有的路径受保护，计数归零后才转入可驱逐集合。匹配最多使用输入的前 `N−1` 个 token，保留至少一个新 token 计算输出 logits。
+
+当空闲页不足，CacheManager 向前缀缓存申请驱逐；Radix 从未锁定的叶节点开始，按时间戳选择候选，归还它们引用的物理位置。因而可用于准入的容量包含空闲容量与可驱逐容量，不能只查看尚未分配的 free list。
+
+请求结束也不等于它计算的全部 KV 立即销毁。`cache_req` 将可缓存的整页前缀插入索引，解除旧句柄的保护，并释放重复前缀对应的本请求分配以及不能保留的尾部；其余前缀可以继续等待后续命中。请求槽回收、前缀解锁与物理页回收是三个动作，混为一谈会导致过早释放或显存泄漏。
+
+### 模型专属状态是另一条存储路径
+
+Qwen3.5 适配展示了上述抽象的边界：混合模型同时拥有 KV、卷积窗口和循环状态。当前参考实现令 Engine 的 `kv_cache=None`，由模型以 `(table_idx, uid)` 关联独立状态，真实 KV 使用动态张量追加；调度层仍用页表与页预算做容量核算。它并未接入普通路径的物理 KV 池。
+
+这条路径也强制使用 naive prefix cache。可恢复状态必须覆盖模型继续执行所需的全部历史，不能只因为 KV 前缀相同就复用缓存。后续统一资源管理，需要定义完整状态的分配、恢复与释放契约；仅将它们放进一个名为 CacheManager 的类并不能完成统一。
+
+## 5. Engine、backend 与异步执行的边界
+
+Engine 将模型计算、采样、CUDA stream 和 Graph 管理组合成可调度的一次前向。Attention backend 负责将通用 Batch 转换为后端所需的元数据，并提供计算及 Graph 配合接口；模型定义网络结构，kernel 实现具体操作。这使算子替换可以局限在执行侧，但更改内存布局或形状约束时，仍需检查上层契约。
+
+普通 decode 的 `GraphRunner` 按预设 batch size 捕获模型前向，使用固定输入、位置、写入位置与 logits buffer。运行时将请求数向上填充到已捕获尺寸，复制实际输入并准备 replay 元数据；虚拟请求使用专门的槽与 dummy page。这里捕获的是模型执行，采样、队列选择、结果判定和整个 HTTP 生命周期仍在 Graph 外部。
+
+Graph 消除部分重复提交成本，overlap 则利用两个 stream 与延后一轮的主机处理组织依赖。scheduler stream 准备元数据，Engine stream 等待这些准备工作后执行当前 Batch；CPU 随后处理上一轮输出，等待对应的复制事件。二者可以组合，但解决的是不同的开销，也不意味着两个模型 Batch 在 GPU 上并发执行。
+
+这一组织方式把回收变成执行协议的一部分：上一轮结果宣布结束时，下一轮工作可能已经排入 Engine stream。归还请求槽前，释放路径必须建立对这些工作完成的依赖，否则新请求可能复用仍会被旧工作写入的槽。代码同时用完成标记防止迟到结果被再次提交，用请求身份检查防止模型专属状态串用。取消沿消息通道到达 scheduler 后，也需要处理在途执行和已有状态，而非只关闭前端连接。
+
+## 6. MTP：将“一次生成”扩展为有提交边界的事务
+
+MTP 在架构上的影响超出预测头本身。普通 decode 每轮推进一个待消费 token，再产生一个新 token；投机路径则先生成多个候选，执行目标验证，最后决定能够提交的前缀。因此，一次模型执行结束和一次请求状态提交不再天然重合。
+
+当前分支把职责拆在两处：`scheduler/mtp.py` 的 `MTPBatchHandler` 将已调度请求映射为 MTP 会话、预留验证区间并更新 token pool；`engine/speculative.py` 的 `GreedyMTPController` 组织候选、验证及状态提交。这里的“事务”描述提交前后状态的隔离方式；实现仍是模型专属的 greedy 实验路径，尚未抽象成任意模型可用的投机插件。
+
+![MTP 的状态提交示意：从已提交状态派生候选与验证临时状态，依据目标验证接受前缀，再提交目标状态、MTP 状态及新 token。](/images/my-sglang/mtp-transaction.svg)
+
+*图 2：MTP 一轮中的已提交状态、临时分支和提交边界。接受长度与 token 是机制示例，不是接受率或吞吐测量。*
+
+会话持有 target state、MTP state、最后一个目标 hidden state，以及 `pending` token。`pending` 已向调用方输出，但目标模型尚未消费；这是理解轮次交接的关键。候选生成在 MTP 状态的副本上展开，目标模型则在 target state 副本上验证 `[pending, candidates…]`，不同请求可以得到不同接受长度。
+
+验证完成后，控制器只接受连续匹配的候选前缀，并追加目标模型确定的下一个 token。当前实现对遭拒绝的分支，从旧 target state 重放真正需要保留的输入前缀；追加的 token 也取自这条实际提交路径的 logits。MTP 状态使用目标 hidden states 重新推进，不能直接提交候选展开时的 hidden states。这里选择了明确的状态恢复语义，重放与复制开销仍需要后续优化。
+
+所有模型操作、长度检查和待发布张量分配完成后，控制器才更新各会话引用。随后适配层同步请求长度、释放只属于拒绝后缀的预留位置，并把新的 pending 写入 token pool。一个批次中请求可以共同执行验证，但接受长度和状态提交仍属于各自请求。
+
+服务层因此必须接收 token 列表而非假设每轮只有一个 token。EOS 与输出预算作用于实际提交序列，usage 根据 token 数累加；SSE 事件数量不能代替输出 token 数。资源释放也要同时结束普通请求状态与 MTP session。
+
+MTP decode 当前绕过普通 `Engine.forward_batch` 和 Sampler，直接调用 controller 的模型路径；mixed 和 Graph 组合被显式拒绝，overlap 关闭。这些限制反映了尚未统一的执行与状态契约，不能从普通路径支持某能力推导出投机路径也支持。
+
+## 7. 架构中的扩展点与当前边界
+
+新增能力应先确定改变哪项契约。模型适配改变状态和前向接口；调度优化改变 Batch 的成员与输入区间；backend 优化改变执行元数据与存储访问；MTP 改变一次执行能够提交多少结果。跨越边界的改动，需要把生命周期一并纳入，而不能只验证局部调用成功。
+
+| 路径 | 本文描述的实现范围 | 不能自动推导的能力 |
+| --- | --- | --- |
+| 普通 Attention | 上游物理 KV 池、页表、Radix、普通 decode Graph/overlap | 所有模型与任意后端组合均已验收 |
+| 混合状态适配 | 请求独立 KV/卷积/循环状态；已有变长 packed 前向 | 真实 paged KV、混合 Prefix Cache 已完成 |
+| 原生 MTP | greedy 候选、验证、批处理与事务式状态提交 | 通用模型插件、随机采样及 Graph/overlap 组合 |
+
+本文讨论的是架构及实现落点，不将模块存在视为性能结论。模型支持矩阵、数值回归和优化收益需要绑定具体版本与配置；这些证据会在对应专题中展开。
+
+阅读源码时，可以按下面的边界进入，而无需先逐行跟完模型：
+
+| 要理解的问题 | 主要入口（相对 `python/minisgl/`） |
+| --- | --- |
+| 进程、协议与消息 | `server/launch.py`、`server/`、`tokenizer/`、`message/` |
+| 请求与批次的数据契约 | `core.py` |
+| 准入、批次选择与结果处理 | `scheduler/scheduler.py`、`scheduler/prefill.py`、`scheduler/decode.py` |
+| 请求槽、页分配与前缀复用 | `scheduler/table.py`、`scheduler/cache.py`、`kvcache/` |
+| 前向、backend、Graph 与采样 | `engine/engine.py`、`engine/graph.py`、`engine/sample.py`、`attention/` |
+| MTP 的调度接入与状态提交 | `scheduler/mtp.py`、`engine/speculative.py` |
+| 网络结构与算子实现 | `models/`、`layers/`、`kernel/` |
+
+后续章节将分别进入请求生命周期、缓存管理、调度、模型适配、MTP 与执行优化。每一篇都沿本文的模块边界定位修改，并同时解释它改变的数据、依赖与验收条件。
 
 ## 参考阅读
 
-- [Inside vLLM: Anatomy of a High-Throughput LLM Inference System](https://vllm.ai/blog/2025-09-05-anatomy-of-vllm)：先建立引擎全貌，再展开调度、执行与服务，适合与本文对照理解不同项目的模块边界。
-- [Mini-SGLang: Efficient Inference Engine in a Nutshell](https://www.lmsys.org/blog/2025-12-17-minisgl/)：介绍本项目所基于的精简引擎及其已有能力，有助于区分上游基础与本分支扩展。
-- [SGLang v0.4](https://www.lmsys.org/blog/2024-12-04-sglang-v0-4/)：展示调度等系统优化如何联系具体开销与测量，后续讨论 overlap 时可继续参考。
+本文图示为依据项目代码重新绘制的机制图。图的组织借鉴系统论文区分逻辑映射、物理存储和状态转换的表达方式，具体实现以本文注明的代码版本为准。
+
+- [Efficient Memory Management for Large Language Model Serving with PagedAttention](https://arxiv.org/abs/2309.06180)：理解逻辑序列与物理 KV 存储的解耦。
+- [SGLang: Efficient Execution of Structured Language Model Programs](https://arxiv.org/abs/2312.07104)：理解 RadixAttention 所讨论的前缀复用与运行时组织。
+- [Inside vLLM](https://vllm.ai/blog/2025-09-05-anatomy-of-vllm)：从系统全貌进入执行循环、调度与服务层。
+- [Mini-SGLang 项目介绍](https://www.lmsys.org/blog/2025-12-17-minisgl/)：本项目上游的定位、架构及基础能力。
+- [SGLang v0.4](https://www.lmsys.org/blog/2024-12-04-sglang-v0-4/)：将调度机制与具体执行开销联系起来的案例。
