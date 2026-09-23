@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="850" height="686" viewBox="0 0 850 686" role="img" aria-labelledby="title desc"><title id="title">Greedy MTP 的候选验证与状态提交</title><desc id="desc">k等于3的教学示例。初始target状态长度为c，pending p已经输出但未消费。draft产生三个候选，target副本验证p,d1,d2,d3，仅接受d1和d2。用p,d1,d2从原状态重放，提交长度c加3的target状态；从重放路径logits获得bonus，并用target hidden重建MTP状态。返回d1,d2,bonus，bonus成为下轮pending。</desc>
+<style>text{font-family:Arial,"Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;fill:#29313a;font-size:16px} .title{font-size:20px;font-weight:600}.label{font-size:17px;font-weight:600}.small{font-size:14px;fill:#596574}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.line{fill:none;stroke:#5d6874;stroke-width:1.3}.arrow{fill:none;stroke:#5d6874;stroke-width:1.3;marker-end:url(#arrow)}.blue{fill:#eaf2f9;stroke:#2e608f;stroke-width:1.4}.box{fill:white;stroke:#73808d;stroke-width:1.2}.dash{fill:#fffaf5;stroke:#b3793e;stroke-width:1.4;stroke-dasharray:5 3}</style><defs><marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#5d6874"/></marker><pattern id="hatch" patternUnits="userSpaceOnUse" width="7" height="7"><path d="M0 7L7 0" stroke="#d9bc9d" stroke-width="1"/></pattern></defs>
+<rect width="850" height="686" fill="white"/>
+<text x="24" y="31" class="title">MTP：验证结果必须与提交状态一致</text>
+<text x="24" y="58" class="small">Greedy、k = 3 的教学样例；两个候选被接受，不是实际运行 trace。</text>
+<text x="24" y="92" class="label">(a) 从已提交状态派生临时执行</text>
+<rect x="24" y="108" width="230" height="89" class="blue"/>
+<text x="139" y="137" class="label" text-anchor="middle">已提交 target：S_c</text>
+<text x="139" y="162" class="mono" text-anchor="middle">pending = p</text>
+<text x="139" y="184" class="small" text-anchor="middle">p 已输出，尚未被 target 消费</text>
+<path d="M256 151 H291" class="arrow"/>
+<rect x="297" y="108" width="236" height="89" class="box"/>
+<text x="415" y="137" class="label" text-anchor="middle">Draft rollout</text>
+<text x="415" y="162" class="mono" text-anchor="middle">d₁ → d₂ → d₃</text>
+<text x="415" y="184" class="small" text-anchor="middle">复制 MTP 状态生成候选</text>
+<path d="M535 151 H570" class="arrow"/>
+<rect x="576" y="108" width="250" height="89" class="box"/>
+<text x="701" y="137" class="label" text-anchor="middle">Target verify · clone(S_c)</text>
+<text x="701" y="163" class="mono" text-anchor="middle">消费 [p, d₁, d₂, d₃]</text>
+<text x="701" y="184" class="small" text-anchor="middle">验证副本长度 c + 4</text>
+<path d="M701 198 V227" class="arrow"/>
+<rect x="340" y="234" width="486" height="93" class="box"/>
+<text x="359" y="260" class="label">比较 target greedy 与候选前缀</text>
+<rect x="363" y="275" width="135" height="35" class="blue"/>
+<text x="430.5" y="299" text-anchor="middle">d₁：接受</text>
+<rect x="512" y="275" width="135" height="35" class="blue"/>
+<text x="579.5" y="299" text-anchor="middle">d₂：接受</text>
+<rect x="661" y="275" width="135" height="35" class="dash"/>
+<text x="728.5" y="299" text-anchor="middle">d₃：拒绝</text>
+<text x="24" y="252" class="label">临时状态不可直接发布</text>
+<text x="24" y="277" class="small">拒绝位置之后的状态不属于</text>
+<text x="24" y="299" class="small">最终输出序列，必须丢弃。</text>
+<text x="24" y="366" class="label">(b) 重放已接受区间，再提交两套状态</text>
+<path d="M701 329 V380 H189 V390" class="arrow"/>
+<rect x="24" y="397" width="330" height="103" class="blue"/>
+<text x="189" y="425" class="label" text-anchor="middle">Replay：从原始 S_c 重建</text>
+<text x="189" y="452" class="mono" text-anchor="middle">消费 [p, d₁, d₂] → S_(c+3)</text>
+<text x="189" y="477" class="small" text-anchor="middle">bonus ← 实际重放路径的最后 logits</text>
+<path d="M356 449 H390" class="arrow"/>
+<rect x="397" y="397" width="429" height="103" class="box"/>
+<text x="611" y="425" class="label" text-anchor="middle">Teacher forcing：重建 MTP 状态</text>
+<text x="611" y="451" class="small" text-anchor="middle">使用真实 target hidden，不提交 draft rollout</text>
+<text x="611" y="477" class="mono small" text-anchor="middle">MTP.length = target.length − 1 = c + 2</text>
+<path d="M189 502 V527 H427 V548" class="arrow"/>
+<path d="M611 502 V527 H427" class="arrow"/>
+<rect x="162" y="554" width="532" height="63" class="blue"/>
+<text x="428" y="580" class="label" text-anchor="middle">发布状态 + 返回 [d₁, d₂, bonus]</text>
+<text x="428" y="604" class="small" text-anchor="middle">pending ← bonus；bonus 已输出，下一轮才被消费</text>
+<text x="24" y="652" class="small">蓝底：保留的状态与候选；虚线：拒绝候选。实现采用 clone / replay，而非分页回滚。</text>
+<text x="24" y="676" class="small">特定模型适配器的状态协议：即使候选全接受，draft 状态也需使用 target hidden 重建。</text>
+</svg>

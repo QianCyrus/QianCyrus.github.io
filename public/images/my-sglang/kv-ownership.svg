@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="850" height="612" viewBox="0 0 850 612" role="img" aria-labelledby="title desc"><title id="title">KV cache 的索引、所有权与物理存储</title><desc id="desc">两个请求共享前两个token，页表A映射到6、1、7、2，页表B映射到6、1、5、0。Radix的主机树拓扑维护引用，GPU页表存储物理token槽地址。请求完成后解锁前缀，只有可驱逐叶子被回收时物理槽才重新空闲。本图用page_size等于1展示地址关系。</desc>
+<style>text{font-family:Arial,"Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;fill:#29313a;font-size:16px} .title{font-size:20px;font-weight:600}.label{font-size:17px;font-weight:600}.small{font-size:14px;fill:#596574}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.line{fill:none;stroke:#5d6874;stroke-width:1.3}.arrow{fill:none;stroke:#5d6874;stroke-width:1.3;marker-end:url(#arrow)}.blue{fill:#eaf2f9;stroke:#2e608f;stroke-width:1.4}.box{fill:white;stroke:#73808d;stroke-width:1.2}.dash{fill:#fffaf5;stroke:#b3793e;stroke-width:1.4;stroke-dasharray:5 3}</style><defs><marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#5d6874"/></marker><pattern id="hatch" patternUnits="userSpaceOnUse" width="7" height="7"><path d="M0 7L7 0" stroke="#d9bc9d" stroke-width="1"/></pattern></defs>
+<rect width="850" height="612" fill="white"/>
+<text x="24" y="31" class="title">KV cache：逻辑索引与物理所有权</text>
+<text x="24" y="62" class="label">(a) Radix 前缀索引</text>
+<text x="391" y="62" class="label">(b) 请求行与物理位置</text>
+<text x="24" y="86" class="small">主机树拓扑 / token key；value 是 GPU 索引</text>
+<text x="391" y="86" class="small">page_table 与 token_pool 位于 GPU</text>
+<rect x="111" y="104" width="117" height="35" class="box"/>
+<text x="169" y="128" class="mono" text-anchor="middle">root</text>
+<path d="M146 140 V160 H105 V179" class="arrow"/>
+<path d="M194 140 V160 H288 V179" class="arrow"/>
+<rect x="27" y="185" width="170" height="81" class="blue"/>
+<text x="112" y="211" class="mono" text-anchor="middle">[p₀, p₁]</text>
+<text x="112" y="235" class="mono small" text-anchor="middle">value = [6, 1]</text>
+<text x="112" y="256" class="small" text-anchor="middle">ref_count = 2</text>
+<rect x="225" y="185" width="126" height="81" class="dash"/>
+<text x="288" y="211" class="mono" text-anchor="middle">[r₀]</text>
+<text x="288" y="235" class="mono small" text-anchor="middle">value = [4]</text>
+<text x="288" y="256" class="small" text-anchor="middle">ref_count = 0</text>
+<text x="27" y="290" class="small">A / B 活动引用共同保护前缀</text>
+<text x="27" y="312" class="small">无引用叶子才可按策略驱逐</text>
+<text x="398" y="160" class="label">请求 A</text>
+<rect x="463" y="134" width="73" height="45" class="blue"/>
+<text x="499.5" y="163" class="mono" text-anchor="middle">6</text>
+<rect x="546" y="134" width="73" height="45" class="blue"/>
+<text x="582.5" y="163" class="mono" text-anchor="middle">1</text>
+<rect x="629" y="134" width="73" height="45" class="box"/>
+<text x="665.5" y="163" class="mono" text-anchor="middle">7</text>
+<rect x="712" y="134" width="73" height="45" class="box"/>
+<text x="748.5" y="163" class="mono" text-anchor="middle">2</text>
+<text x="398" y="236" class="label">请求 B</text>
+<rect x="463" y="210" width="73" height="45" class="blue"/>
+<text x="499.5" y="239" class="mono" text-anchor="middle">6</text>
+<rect x="546" y="210" width="73" height="45" class="blue"/>
+<text x="582.5" y="239" class="mono" text-anchor="middle">1</text>
+<rect x="629" y="210" width="73" height="45" class="box"/>
+<text x="665.5" y="239" class="mono" text-anchor="middle">5</text>
+<rect x="712" y="210" width="73" height="45" class="box"/>
+<text x="748.5" y="239" class="mono" text-anchor="middle">0</text>
+<text x="499" y="119" class="small" text-anchor="middle">pos 0</text>
+<text x="582" y="119" class="small" text-anchor="middle">pos 1</text>
+<text x="665" y="119" class="small" text-anchor="middle">pos 2</text>
+<text x="748" y="119" class="small" text-anchor="middle">pos 3</text>
+<text x="463" y="195" class="small">A 的私有尾部：7 → 2</text>
+<text x="620" y="278" class="small">B 的私有尾部：5 → 0</text>
+
+<path d="M499 256 V307 H676 V439" class="arrow"/>
+<path d="M582 256 V328 H171 V439" class="arrow"/>
+<text x="426" y="359" class="small" text-anchor="middle">同一物理槽被多个请求行引用</text>
+<text x="423" y="391" class="label" text-anchor="middle">(c) 按层 K / V 存储 · 非连续地址</text>
+<rect x="24" y="443" width="92" height="56" class="box"/>
+<text x="70" y="461" class="small mono" text-anchor="middle">slot 0</text>
+<text x="70" y="486" text-anchor="middle">B 尾部</text>
+<rect x="125" y="443" width="92" height="56" class="blue"/>
+<text x="171" y="461" class="small mono" text-anchor="middle">slot 1</text>
+<text x="171" y="486" text-anchor="middle">p₁</text>
+<rect x="226" y="443" width="92" height="56" class="box"/>
+<text x="272" y="461" class="small mono" text-anchor="middle">slot 2</text>
+<text x="272" y="486" text-anchor="middle">A 尾部</text>
+<rect x="327" y="443" width="92" height="56" class="box"/>
+<text x="373" y="461" class="small mono" text-anchor="middle">slot 3</text>
+<text x="373" y="486" text-anchor="middle">空闲</text>
+<rect x="428" y="443" width="92" height="56" class="dash"/>
+<text x="474" y="461" class="small mono" text-anchor="middle">slot 4</text>
+<text x="474" y="486" text-anchor="middle">r₀</text>
+<rect x="529" y="443" width="92" height="56" class="box"/>
+<text x="575" y="461" class="small mono" text-anchor="middle">slot 5</text>
+<text x="575" y="486" text-anchor="middle">B 尾部</text>
+<rect x="630" y="443" width="92" height="56" class="blue"/>
+<text x="676" y="461" class="small mono" text-anchor="middle">slot 6</text>
+<text x="676" y="486" text-anchor="middle">p₀</text>
+<rect x="731" y="443" width="92" height="56" class="box"/>
+<text x="777" y="461" class="small mono" text-anchor="middle">slot 7</text>
+<text x="777" y="486" text-anchor="middle">A 尾部</text>
+<path d="M333 523 H367" class="arrow"/>
+<text x="24" y="528" class="small">请求完成 → unlock(handle)</text>
+<text x="382" y="528" class="small">ref_count 归零 → 可驱逐</text>
+<path d="M579 523 H608" class="arrow"/>
+<text x="620" y="528" class="small">evict → free slots</text>
+<rect x="24" y="552" width="18" height="16" class="blue"/>
+<text x="51" y="566" class="small">蓝底实线：活动引用保护</text>
+<rect x="277" y="552" width="18" height="16" class="dash"/>
+<text x="304" y="566" class="small">虚线：可驱逐缓存</text>
+<text x="550" y="566" class="small">请求行回收 ≠ 全部 KV 释放</text>
+<text x="24" y="592" class="small">图例 page_size = 1；实际分配单位仍为 page。各层共用地址映射，K / V 数据分别存放。</text>
+</svg>

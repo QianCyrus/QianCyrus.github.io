@@ -84,9 +84,12 @@ Chunked Prefill 将单次输入工作限制在 token budget 内。未完成的�
 
 普通 Attention 路径把 KV 管理拆成三个层次：`MHAKVCache` 持有物理张量，页表维护请求逻辑位置到设备存储位置的映射，Radix Cache 维护可以复用的 token 前缀。它们共同工作，但生命周期不同。
 
-![普通 Attention 路径的 KV 所有权：请求槽映射至页表，Radix 前缀索引复用物理 token 槽；锁定与驱逐控制页的回收。](/images/my-sglang/kv-ownership.svg)
-
-*图 1：普通 Attention 路径中的映射与所有权示意。颜色表示资源角色，箭头表示引用或回收关系；页号与请求均为示例，不是运行测量。混合模型的独立状态路径见本节末尾。*
+<figure class="sg-static-figure">
+<div class="sg-static-scroll" tabindex="0" role="region" aria-label="KV 缓存映射图，窄屏可横向滚动">
+<img src="/images/my-sglang/kv-ownership.svg" alt="普通 Attention 路径的 KV 所有权：请求槽映射至页表，Radix 前缀索引复用物理 token 槽；锁定与驱逐控制页的回收。" loading="lazy" />
+</div>
+<figcaption>图 1：普通 Attention 路径中的映射与所有权示意。箭头表示引用或回收关系；地址与请求均为示例，不是运行测量。混合模型的独立状态路径见本节末尾。<a href="/images/my-sglang/kv-ownership.svg" target="_blank" rel="noopener">查看完整 SVG</a>；窄屏可横向滚动。</figcaption>
+</figure>
 
 ### 物理池与页表
 
@@ -124,9 +127,12 @@ MTP 在架构上的影响超出预测头本身。普通 decode 每轮推进一�
 
 当前分支把职责拆在两处：`scheduler/mtp.py` 的 `MTPBatchHandler` 将已调度请求映射为 MTP 会话、预留验证区间并更新 token pool；`engine/speculative.py` 的 `GreedyMTPController` 组织候选、验证及状态提交。这里的“事务”描述提交前后状态的隔离方式；实现仍是模型专属的 greedy 实验路径，尚未抽象成任意模型可用的投机插件。
 
-![MTP 的状态提交示意：从已提交状态派生候选与验证临时状态，依据目标验证接受前缀，再提交目标状态、MTP 状态及新 token。](/images/my-sglang/mtp-transaction.svg)
-
-*图 2：MTP 一轮中的已提交状态、临时分支和提交边界。接受长度与 token 是机制示例，不是接受率或吞吐测量。*
+<figure class="sg-static-figure">
+<div class="sg-static-scroll" tabindex="0" role="region" aria-label="MTP 状态提交图，窄屏可横向滚动">
+<img src="/images/my-sglang/mtp-transaction.svg" alt="MTP 的状态提交示意：从已提交状态派生候选与验证临时状态，依据目标验证接受前缀，再提交目标状态、MTP 状态及新 token。" loading="lazy" />
+</div>
+<figcaption>图 2：MTP 一轮中的已提交状态、临时分支和提交边界。接受长度与 token 是机制示例，不是接受率或吞吐测量。<a href="/images/my-sglang/mtp-transaction.svg" target="_blank" rel="noopener">查看完整 SVG</a>；窄屏可横向滚动。</figcaption>
+</figure>
 
 会话持有 target state、MTP state、最后一个目标 hidden state，以及 `pending` token。`pending` 已向调用方输出，但目标模型尚未消费；这是理解轮次交接的关键。候选生成在 MTP 状态的副本上展开，目标模型则在 target state 副本上验证 `[pending, candidates…]`，不同请求可以得到不同接受长度。
 

@@ -1,0 +1,478 @@
+---
+// Mount once on the article route. The article owns the custom-element locations
+// and their static, no-JavaScript fallback text.
+---
+
+<script>
+  type NodeInfo = {
+    title: string; tag: string; type: 'base' | 'extended' | 'new';
+    summary: string; input: string; output: string; source: string[]; note: string;
+  };
+  const modules: Record<string, NodeInfo> = {
+    http: { title: 'HTTP 服务与流式协议', tag: '协议边界', type: 'base',
+      summary: '解析请求、维护异步响应通道，并把客户端生命周期转换为后端消息；HTTP 层不直接调用模型。',
+      input: 'messages / sampling parameters / 连接断开', output: 'TokenizeMsg、AbortMsg；JSON / SSE',
+      source: ['server/api_server.py', 'message/frontend.py'],
+      note: 'usage 使用后端 token 计数；文本切片、SSE 消息和 token 边界不一一对应。' },
+    tokenizer: { title: 'Tokenizer / Detokenizer', tag: '消息边界', type: 'base',
+      summary: '把文本协议转换为 token 协议，应用聊天模板，并维护增量反分词所需的上下文。',
+      input: '文本请求 / 调度器生成的 token IDs', output: 'UserMsg / 反分词增量与完成信息',
+      source: ['tokenizer/server.py', 'tokenizer/tokenize.py', 'tokenizer/detokenize.py'],
+      note: 'num_tokenizer=0 时两类职责共享 worker；配置也支持独立 tokenizer workers。图按逻辑职责展开，进程间使用 ZMQ。' },
+    scheduler: { title: 'Scheduler：批次与生命周期的所有者', tag: '控制流', type: 'extended',
+      summary: '维护 waiting / running 工作集合，在请求槽位、缓存容量和 token 预算约束下构造 Batch，收敛完成与取消事件。',
+      input: '新请求、资源余量、前一轮结果', output: 'ForwardInput；队列变化、结果消息与回收操作',
+      source: ['scheduler/scheduler.py', 'scheduler/prefill.py', 'scheduler/decode.py'],
+      note: 'Req 跨迭代保留身份与长度；Batch 只描述一次执行。Chunked prefill 切分输入工作，连续批处理在迭代边界重组成员。' },
+    engine: { title: 'Engine：设备执行边界', tag: '进程内对象', type: 'base',
+      summary: '持有模型、设备 stream、Attention backend、Sampler 和 GraphRunner；在 Context 中绑定当前 Batch，选择 eager forward 或 Graph replay。',
+      input: 'Batch、采样参数与已准备的设备元数据', output: 'GPU / CPU token IDs 与 copy_done_event',
+      source: ['engine/engine.py', 'engine/graph.py', 'engine/sample.py', 'core.py'],
+      note: 'Engine 与 Scheduler 同属一个 worker 进程。overlap 由 scheduler loop 与 stream/event 协调，Graph 是执行策略而非独立服务。' },
+    model: { title: 'Model / Layers / Backend', tag: '计算契约', type: 'extended',
+      summary: '模型定义层次与权重映射；Layers 组织矩阵与激活计算；Attention backend 解释批次元数据和缓存布局，选择对应 kernel。',
+      input: 'Context.batch、权重、位置与 KV 映射', output: 'logits；模型状态和设备缓存更新',
+      source: ['models/register.py', 'models/base.py', 'layers/attention.py', 'attention/base.py'],
+      note: '接入一个模型需要同时满足执行与状态契约。混合循环模型是扩展例子：请求状态不能只用 Attention KV 表达。' },
+    gpu: { title: 'GPU 执行与驻留数据', tag: '设备边界', type: 'base',
+      summary: '矩阵运算、Attention、逐元素算子与采样运行于设备；权重和通用 KV pool 常驻，输入及元数据按批次更新。',
+      input: '设备张量、kernel launch / Graph replay', output: '结果张量与完成事件',
+      source: ['kernel/__init__.py', 'kvcache/mha_pool.py', 'engine/sample.py'],
+      note: 'CPU 控制逻辑也会提交 GPU 元数据操作。设备结果须由 Scheduler 收敛，再经 Detokenizer 与 HTTP 返回。' },
+    pool: { title: 'KV pool 与设备地址映射', tag: '物理存储', type: 'base',
+      summary: 'MHAKVCache 持有按层组织的 K / V 设备 buffer；page_table 将请求内 token 位置映射到物理 token 槽。缓存数据与分配策略由不同对象承担。',
+      input: 'layer_id、K / V 张量、out_loc 与请求页表', output: '按物理位置写入 KV；供 Attention backend 读取历史',
+      source: ['kvcache/mha_pool.py', 'engine/engine.py', 'attention/base.py'],
+      note: 'buffer 布局为 [2, layers, pages, page_size, local_kv_heads, head_dim]。CacheManager 管理页分配与前缀引用，TableManager 管理请求行；pool 本身不决定驱逐策略。' },
+    cache: { title: 'CacheManager：容量与前缀所有权', tag: '资源管理', type: 'base',
+      summary: '按 page 分配物理空间，写入请求映射；通过 radix handle 固定共享前缀，仅驱逐未被活动请求保护的缓存。',
+      input: 'cached_len / device_len、prefix handle、空闲页', output: 'page_table 条目；protected / evictable 状态',
+      source: ['scheduler/cache.py', 'kvcache/radix_cache.py', 'kvcache/mha_pool.py'],
+      note: '结束请求会归还引用与槽位，但有效前缀可留在 radix cache。只有驱逐或不可保留的尾部等回收动作才把物理页归还 free list。' },
+    table: { title: 'TableManager：请求槽位与 token pool', tag: '身份映射', type: 'base',
+      summary: '为活动请求分配 table_idx；该行连接请求身份、token_pool 和 page_table，避免将调度身份与物理 KV 地址混为一谈。',
+      input: '准入 / 请求结束或取消', output: '可复用请求行；token_pool[table_idx, position]',
+      source: ['scheduler/table.py', 'core.py'],
+      note: 'page_table 位于 GPU，条目是物理 token 槽地址；分配单位仍是 page。table_idx 的回收不等价于该请求全部 KV 页立即释放。' },
+    mtp: { title: 'MTP：候选、验证与状态提交', tag: '可选执行旁支', type: 'new',
+      summary: 'MTPBatchHandler 将会话组织成 GPU 批次，GreedyMTPController 生成候选、验证接受前缀，并重建应提交的 target / draft 状态。',
+      input: 'pending token、last_hidden、独立 target / draft 状态', output: '接受前缀 + target bonus；新 pending 与会话状态',
+      source: ['scheduler/mtp.py', 'engine/speculative.py'],
+      note: '当前旁支由特定模型适配器提供，使用 greedy clone / replay；不是所有模型通用启用的事务框架。MTP 不自动继承普通路径的 mixed / Graph / overlap 兼容性。' },
+  };
+
+  type Step = { phase: string; title: string; text: string; active: string[]; edges: string[]; payload: string; state: string; invariant: string; response: string; };
+  const startSteps: Step[] = [
+    { phase: 'Ingress', title: '01 · 消息进入调度域', text: 'HTTP 与编码层将协议请求转换为后端消息。Scheduler 接收新请求及取消消息；客户端连接与 GPU 工作之间没有直接调用关系。', active: ['ingress'], edges: ['ingress-scheduler'], payload: 'UserMsg → pending request；AbortBackendMsg → lifecycle event', state: '等待准入', invariant: '请求身份跨批次稳定', response: '编码后的消息进入调度队列' },
+    { phase: 'Admission', title: '02 · 准入与资源绑定', text: 'PrefillManager 匹配可复用前缀，并在容量允许时分配请求行、锁定命中 handle。可运行性同时受请求槽、KV 容量与本轮 token 预算约束。', active: ['scheduler'], edges: [], payload: 'prefix match → lock(handle) → table_idx → Req', state: '活动请求持有 prefix 引用', invariant: '被引用的前缀不可驱逐', response: '进入可运行集合' },
+    { phase: 'Schedule', title: '03 · 从请求集合构造一次执行', text: 'PrefillManager / DecodeManager 选择本轮工作，构造 Batch。分块控制本次新增 token 量；调度策略决定 prefill 与 decode 如何分享预算。', active: ['scheduler'], edges: ['scheduler-engine'], payload: 'Req[] → Batch → ForwardInput', state: 'cached_len ≤ device_len', invariant: '批次临时，请求状态持久', response: '本轮成员及新增区间确定' },
+    { phase: 'Prepare', title: '04 · 准备地址与后端元数据', text: 'Scheduler 分配新增页、形成扁平 input_ids / positions / out_loc；Engine 内的 backend 初始化 Attention 元数据。Context 将当前 Batch 暂时绑定给模型层。', active: ['scheduler', 'engine'], edges: ['scheduler-engine'], payload: 'page_table + token_pool → positions / out_loc / attn_metadata', state: '映射写入已分配的 KV 槽', invariant: '逻辑位置与物理地址解耦', response: '计算输入和缓存地址就绪' },
+    { phase: 'Execute', title: '05 · 提交计算与结果拷贝', text: 'Engine 在设备 stream 上执行 eager forward 或可用的 Graph replay，随后采样并发起 token IDs 的异步 CPU 拷贝。GPU 不直接发送网络响应。', active: ['engine', 'gpu'], edges: ['engine-gpu'], payload: 'Context(batch) → model / graph → logits → Sampler → copy_done_event', state: '设备状态前移；主机结果待就绪', invariant: '完成事件约束读取时机', response: '本轮 GPU 工作已提交' },
+    { phase: 'Reconcile', title: '06 · 收敛结果与生命周期', text: 'Scheduler 等待对应拷贝事件，更新主机 token 序列、检查 EOS / 长度限制，并生成反分词消息。overlap 模式可先提交下一批，再处理上一批结果。', active: ['gpu', 'reconcile'], edges: ['gpu-reconcile'], payload: 'ForwardOutput → host tokens / finish_reason / DetokenizeMsg', state: '本轮主机结果可读', invariant: '输出只提交给所属请求', response: '结果可交给反分词层' },
+  ];
+  const completeSteps: Step[] = [
+    { phase: 'Emit', title: '07 · 传递增量结果', text: 'Detokenizer 将 token 增量转换成可发送文本，前端继续 SSE 或汇总非流式结果。usage 保持后端 token 口径，不能按消息数量计算。', active: ['reconcile', 'egress'], edges: ['reconcile-egress'], payload: 'token IDs → text delta / usage / finish_reason', state: '运行请求仍持有资源', invariant: 'SSE 消息数 ≠ token 数', response: '增量文本发送给客户端' },
+    { phase: 'Reschedule', title: '08 · 迭代边界重组批次', text: '未结束请求回到 decode 集合；新请求可以参与后续调度。上一轮输出成为下一轮输入，Batch 成员无需与上一轮相同。此边界也决定哪些状态必须跨迭代保留。', active: ['reconcile', 'scheduler'], edges: ['reconcile-scheduler'], payload: 'next Batch = schedule(waiting, running, capacity, budget)', state: '保留请求身份、缓存引用和生成位置', invariant: '连续批处理在迭代边界生效', response: '循环回到第 03 步，直到完成' },
+    { phase: 'Retire', title: '09 · 退役请求与保留前缀', text: '完成时插入有效、页对齐的前缀，释放重复分配或不可保留的尾部，解除 handle 引用并归还 table_idx。无引用前缀可继续缓存，直至容量压力触发驱逐。', active: ['scheduler', 'reconcile'], edges: [], payload: 'cache_req(finished=True) → unlock → table.free；evict 按需发生', state: '请求行可复用；前缀可能仍驻留', invariant: 'request finished ≠ cache evicted', response: '生命周期结束，缓存策略继续生效' },
+  ];
+  const cancelSteps: Step[] = [
+    { phase: 'Abort', title: '07 · 取消转化为调度事件', text: '客户端断开后，前端经消息通道发送取消。取消控制的是后续调度与结果可见性，不是强制中断已提交的 CUDA kernel。', active: ['ingress', 'scheduler'], edges: ['ingress-scheduler'], payload: 'AbortMsg → AbortBackendMsg → remove request', state: '等待 / 运行集合移除该请求', invariant: '连接关闭不等于资源已回收', response: '客户端不再等待增量结果' },
+    { phase: 'Drain', title: '08 · 已提交工作正确收尾', text: '取消处理必须与已提交批次的结果收敛协调，避免陈旧结果继续输出，也避免请求槽复用后写入另一条请求。资源释放发生在调度生命周期内。', active: ['gpu', 'reconcile', 'scheduler'], edges: ['gpu-reconcile'], payload: 'finished_reqs / request identity → discard stale output', state: '不再为已取消请求安排下一轮', invariant: '槽位复用不得改变请求身份', response: '无后续输出，执行收尾' },
+    { phase: 'Release', title: '09 · 回收活动所有权', text: '释放请求行与活动引用；通用 radix 路径仍按缓存策略保留有效前缀。模型适配器若持有独立循环状态，还需执行相应 release。取消与全部 KV 清空并不等价。', active: ['scheduler', 'reconcile'], edges: [], payload: 'release request → table slot reusable；prefix may remain evictable', state: '活动请求结束；缓存可供复用或驱逐', invariant: '两类资源分别回收', response: '取消完成' },
+  ];
+
+  let instanceCount = 0;
+  class MySglangExplorer extends HTMLElement {
+    private uid = `mysg-${++instanceCount}`;
+    private index = 0;
+    private scenario = 'complete';
+    private playing = false;
+    private selected = 'scheduler';
+    private timer: ReturnType<typeof setTimeout> | undefined;
+    private frame = 0;
+    private resizeObserver?: ResizeObserver;
+    private intersectionObserver?: IntersectionObserver;
+    private abort?: AbortController;
+    private motion = window.matchMedia('(prefers-reduced-motion: reduce)');
+    private get steps() { return [...startSteps, ...(this.scenario === 'cancel' ? cancelSteps : completeSteps)]; }
+    private get isFlow() { return this.getAttribute('view') === 'flow'; }
+
+    connectedCallback() {
+      this.abort?.abort();
+      this.abort = new AbortController();
+      this.classList.add('sg-widget');
+      this.setAttribute('role', 'group');
+      this.setAttribute('aria-label', this.isFlow ? 'My_Sglang 请求数据流交互演示' : 'My_Sglang 交互架构图');
+      this.innerHTML = this.isFlow ? this.flowMarkup() : this.architectureMarkup();
+      this.addEventListener('click', (event) => {
+        const target = (event.target as Element).closest<HTMLElement>('[data-module], button');
+        if (!target) return;
+        if (target.dataset.module) this.selectModule(target.dataset.module);
+        if (target.dataset.action) this.control(target.dataset.action);
+      }, { signal: this.abort.signal });
+      this.addEventListener('keydown', (event) => {
+        const target = (event.target as Element).closest<SVGElement>('[data-module]');
+        if (target && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); this.selectModule(target.dataset.module!); }
+      }, { signal: this.abort.signal });
+      this.querySelector('select')?.addEventListener('change', (event) => {
+        this.pause();
+        this.scenario = (event.target as HTMLSelectElement).value;
+        this.index = 0;
+        this.renderStep();
+      }, { signal: this.abort.signal });
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) this.pause();
+      }, { signal: this.abort.signal });
+      this.motion.addEventListener('change', () => {
+        this.pause();
+        this.updateMotionNote();
+      }, { signal: this.abort.signal });
+      if (this.isFlow) {
+        this.resizeObserver = new ResizeObserver(() => this.drawEdges());
+        this.resizeObserver.observe(this.querySelector('.sg-flow-board')!);
+        this.intersectionObserver = new IntersectionObserver(([entry]) => {
+          if (!entry.isIntersecting) this.pause();
+        }, { threshold: 0 });
+        this.intersectionObserver.observe(this);
+        this.renderStep();
+        this.updateMotionNote();
+        requestAnimationFrame(() => this.drawEdges());
+      } else this.selectModule(this.selected);
+    }
+
+    disconnectedCallback() {
+      this.pause();
+      this.abort?.abort();
+      this.resizeObserver?.disconnect();
+      this.intersectionObserver?.disconnect();
+    }
+
+    private node(key: string, x: number, y: number, w: number, h: number, title: string, sub: string) {
+      return `<g class="sg-module" data-module="${key}" role="button" tabindex="0" aria-label="查看 ${modules[key].title}" aria-pressed="false" aria-controls="${this.uid}-detail"><rect x="${x}" y="${y}" width="${w}" height="${h}"/><text class="sg-svg-title" x="${x + w / 2}" y="${y + h / 2 - 3}" text-anchor="middle">${title}</text><text class="sg-svg-sub" x="${x + w / 2}" y="${y + h / 2 + 17}" text-anchor="middle">${sub}</text></g>`;
+    }
+
+    private architectureMarkup() {
+      return `<div class="sg-panel">
+        <div class="sg-figure-head"><h3>交互图 A · 系统组件与边界</h3><span>TP = 1 的部署示意</span></div>
+        <p class="sg-intro">点击模块查看职责、数据契约与源码。图中实线为主执行流，虚线为资源依赖或可选路径。</p>
+        <div class="sg-diagram-scroll" tabindex="0" role="region" aria-label="系统架构图，窄屏可横向滚动">
+        <svg class="sg-architecture" viewBox="0 0 800 550" role="group" aria-labelledby="${this.uid}-title ${this.uid}-desc">
+          <title id="${this.uid}-title">My_Sglang 系统架构</title><desc id="${this.uid}-desc">服务及编码层通过消息连接 scheduler worker。Scheduler 持有 Engine 和缓存管理器；Engine 内有模型、后端、采样和 Graph。MTP 是可选旁支，GPU 承载计算和 KV 存储。</desc>
+          <defs><marker id="${this.uid}-arch-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto-start-reverse"><path d="M0,0 L7,3.5 L0,7 Z" fill="#48505a"/></marker></defs>
+          <rect class="sg-process-boundary" x="20" y="146" width="760" height="265"/>
+          <rect class="sg-device-boundary" x="20" y="453" width="760" height="88"/>
+          <text class="sg-svg-label" x="22" y="19">(a) 服务与编码 · 独立进程 / workers</text>
+          ${this.node('http',22,36,175,61,'HTTP / SSE','协议 · 连接 · 取消')}
+          ${this.node('tokenizer',262,36,248,61,'Tokenizer / Detokenizer','文本 ↔ token IDs')}
+          <path class="sg-arch-edge" marker-end="url(#${this.uid}-arch-arrow)" d="M199 57 H256 M256 79 H199"/>
+          <text class="sg-svg-sub" x="223" y="45" text-anchor="middle">ZMQ</text>
+          <text class="sg-svg-sub" x="539" y="57">worker 可共享或拆分</text><text class="sg-svg-sub" x="539" y="78">进程配置不改变消息边界</text>
+          <path class="sg-arch-edge" marker-end="url(#${this.uid}-arch-arrow)" d="M360 98 V113 H7 V222 H39"/>
+          <path class="sg-arch-edge" marker-end="url(#${this.uid}-arch-arrow)" d="M43 256 H15 V125 H412 V99"/>
+          <text class="sg-svg-sub" x="436" y="126">请求 / token 结果 · ZMQ</text>
+          <text class="sg-svg-label" x="34" y="166">(b) Scheduler worker · Python 对象在同一进程内</text>
+          ${this.node('scheduler',45,180,195,114,'Scheduler','队列 · 准入 · Batch')}
+          <rect class="sg-engine-boundary" x="288" y="180" width="282" height="166"/>
+          ${this.node('engine',300,192,258,51,'Engine','stream · Sampler · GraphRunner')}
+          ${this.node('model',300,256,258,76,'Model / Layers / Backend','前向 · Attention · kernels')}
+          <path class="sg-arch-edge" marker-end="url(#${this.uid}-arch-arrow)" d="M242 232 H282"/><text class="sg-svg-sub" x="261" y="219" text-anchor="middle">Batch</text>
+          ${this.node('cache',615,180,142,66,'CacheManager','分配 · pin · evict')}
+          ${this.node('table',615,258,142,66,'TableManager','请求行 · token pool')}
+          <path class="sg-arch-dependency" marker-end="url(#${this.uid}-arch-arrow)" d="M143 180 V173 H598 V211 H608 M572 292 H608"/>
+          <text class="sg-svg-sub" x="612" y="348">radix tree / free pages</text>
+          ${this.node('mtp',45,331,195,59,'MTP（可选）','候选 → 验证 → 提交')}
+          <path class="sg-arch-dependency" marker-end="url(#${this.uid}-arch-arrow)" d="M142 296 V325 M242 361 H270 V311 H293"/>
+          <text class="sg-svg-sub" x="298" y="379">模型适配器可持有独立请求状态</text>
+          <text class="sg-svg-sub" x="298" y="396">混合模型的状态布局不等同于通用 KV pool</text>
+          <path class="sg-arch-edge" marker-end="url(#${this.uid}-arch-arrow)" d="M410 413 V459 M429 459 V413"/>
+          <text class="sg-svg-sub" x="238" y="441">提交计算 / 完成事件</text>
+          <path class="sg-arch-dependency" marker-end="url(#${this.uid}-arch-arrow)" d="M686 355 V459"/>
+          <text class="sg-svg-sub" x="701" y="436">地址映射</text>
+          <text class="sg-svg-label" x="34" y="472">(c) GPU · 设备计算与存储</text>
+          ${this.node('gpu',45,483,350,45,'Model kernels + sampling','权重 / 激活 / 计算结果')}
+          ${this.node('pool',452,483,305,45,'KV pool + page_table','按层 K/V 张量 · 物理 token 槽')}
+        </svg></div>
+        <div class="sg-module-detail" id="${this.uid}-detail" aria-live="polite" aria-atomic="true"></div>
+        <p class="sg-caption">图示采用通用 Attention 路径。MTP 及混合状态由特定适配器扩展，不表示全部模型与执行组合均已支持。</p>
+      </div>`;
+    }
+
+    private selectModule(key: string) {
+      const node = modules[key];
+      if (!node) return;
+      this.selected = key;
+      this.querySelectorAll<HTMLElement>('[data-module]').forEach((button) => {
+        button.setAttribute('aria-pressed', String(button.dataset.module === key));
+      });
+      const detail = this.querySelector('.sg-module-detail');
+      if (!detail) return;
+      detail.innerHTML = `<div class="sg-detail-heading"><h4>${node.title}</h4><span class="sg-origin sg-origin-${node.type}">${node.tag}</span></div><p>${node.summary}</p><dl><div><dt>输入</dt><dd>${node.input}</dd></div><div><dt>输出</dt><dd>${node.output}</dd></div></dl><p class="sg-detail-note">${node.note}</p><div class="sg-source"><span>源码 · python/minisgl/</span>${node.source.map((source) => `<code>${source}</code>`).join('')}</div>`;
+    }
+
+    private flowMarkup() {
+      const nodes = [
+        ['ingress', 'Ⅰ', '协议与编码', 'HTTP → Tokenizer → 消息'],
+        ['scheduler', 'Ⅱ', '选择下一批工作', 'Scheduler · Req → Batch'],
+        ['engine', 'Ⅲ', '准备与执行', 'metadata → Engine.forward'],
+        ['gpu', 'Ⅳ', '设备计算', '模型 · KV 更新 · 采样'],
+        ['reconcile', 'Ⅴ', '收敛执行结果', 'Scheduler · event / lifecycle'],
+        ['egress', 'Ⅵ', '增量响应', 'Detokenizer → HTTP / SSE'],
+      ];
+      return `<div class="sg-panel sg-flow-panel">
+        <div class="sg-figure-head"><h3>交互图 B · 迭代执行与状态收敛</h3><span>机制示意 · 非性能 trace</span></div>
+        <p class="sg-intro">普通执行路径。沿控制流观察持久请求状态与临时 Batch 的交接；步骤顺序不表达真实耗时或并行比例。</p>
+        <div class="sg-flow-toolbar"><label for="${this.uid}-scenario">场景 <select id="${this.uid}-scenario"><option value="complete">生成循环与正常退役</option><option value="cancel">取消与执行收尾</option></select></label><span class="sg-phase" data-phase></span></div>
+        <div class="sg-flow-board">
+          <svg class="sg-flow-edges" aria-hidden="true" focusable="false"><defs><marker id="${this.uid}-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#7c8590"/></marker><marker id="${this.uid}-active-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#2e608f"/></marker></defs><g class="sg-edge-paths"></g><circle class="sg-particle" r="4" fill="#2e608f" stroke="#fff" stroke-width="2" visibility="hidden"/></svg>
+          ${nodes.map(([key, num, title, subtitle]) => `<div class="sg-flow-node sg-flow-node-${key}" data-flow-node="${key}"><span class="sg-flow-num">${num}</span><strong>${title}</strong><small>${subtitle}</small></div>`).join('')}
+        </div>
+        <div class="sg-flow-registers"><div><span>本步约束</span><strong data-invariant></strong></div><div><span>资源 / 状态</span><strong data-state></strong></div></div>
+        <div class="sg-controls" aria-label="执行循环播放控制"><button type="button" data-action="play" class="sg-play" aria-label="播放数据流演示" aria-pressed="false"><span data-play-label>播放</span><span aria-hidden="true" data-play-icon>▶</span></button><button type="button" data-action="previous" aria-label="上一步">← 上一步</button><button type="button" data-action="next" aria-label="下一步">下一步 →</button><button type="button" data-action="reset" aria-label="重置数据流演示">重置</button></div>
+        <div class="sg-progress-row"><progress max="9" value="1" aria-label="数据流步骤进度"></progress><span data-progress>1 / 9</span></div>
+        <div class="sg-step-detail" aria-live="polite" aria-atomic="true"><h4 data-step-title></h4><p data-step-text></p><code data-payload></code></div>
+        <div class="sg-stream"><span class="sg-stream-label">可观察结果</span><span data-response></span></div>
+        <p class="sg-caption">图中“选择工作”和“收敛结果”是同一 Scheduler 的不同职责；overlap 将相邻迭代交错，未改变结果归属。<span data-motion-note></span></p>
+      </div>`;
+    }
+
+    private control(action: string) {
+      if (action === 'play') {
+        if (this.playing) this.pause();
+        else {
+          if (this.index === this.steps.length - 1) this.index = 0;
+          this.playing = true;
+          this.renderStep();
+          this.animateEdges();
+          this.schedule();
+        }
+        return;
+      }
+      this.pause();
+      if (action === 'previous') this.index = Math.max(0, this.index - 1);
+      if (action === 'next') this.index = Math.min(this.steps.length - 1, this.index + 1);
+      if (action === 'reset') this.index = 0;
+      this.renderStep();
+      if (action !== 'reset') this.animateEdges();
+    }
+
+    private schedule() {
+      clearTimeout(this.timer);
+      this.timer = setTimeout(() => {
+        if (!this.playing) return;
+        if (this.index >= this.steps.length - 1) { this.pause(); return; }
+        this.index++;
+        this.renderStep();
+        this.animateEdges();
+        this.schedule();
+      }, 4200);
+    }
+
+    private pause() {
+      this.playing = false;
+      clearTimeout(this.timer);
+      cancelAnimationFrame(this.frame);
+      this.querySelector('.sg-particle')?.setAttribute('visibility', 'hidden');
+      this.updatePlayButton();
+    }
+
+    private updatePlayButton() {
+      const button = this.querySelector('[data-action="play"]');
+      if (!button) return;
+      button.setAttribute('aria-pressed', String(this.playing));
+      button.setAttribute('aria-label', this.playing ? '暂停数据流演示' : '播放数据流演示');
+      this.querySelector('[data-play-label]')!.textContent = this.playing ? '暂停' : '播放';
+      this.querySelector('[data-play-icon]')!.textContent = this.playing ? 'Ⅱ' : '▶';
+    }
+
+    private updateMotionNote() {
+      const note = this.querySelector('[data-motion-note]');
+      if (note) note.textContent = this.motion.matches ? ' 已遵循系统减少动态效果设置，仅显示离散步骤。' : '';
+    }
+
+    private renderStep() {
+      const step = this.steps[this.index];
+      const values = {
+        '[data-phase]': step.phase, '[data-step-title]': step.title,
+        '[data-step-text]': step.text, '[data-payload]': step.payload,
+        '[data-state]': step.state, '[data-response]': step.response, '[data-invariant]': step.invariant,
+        '[data-progress]': `${this.index + 1} / ${this.steps.length}`,
+      };
+      for (const [selector, value] of Object.entries(values)) this.querySelector(selector)!.textContent = value;
+      this.querySelectorAll<HTMLElement>('[data-flow-node]').forEach((node) => {
+        node.classList.toggle('is-active', step.active.includes(node.dataset.flowNode!));
+      });
+      const progress = this.querySelector('progress')!;
+      progress.max = this.steps.length;
+      progress.value = this.index + 1;
+      this.querySelector<HTMLButtonElement>('[data-action="previous"]')!.disabled = this.index === 0;
+      this.querySelector<HTMLButtonElement>('[data-action="next"]')!.disabled = this.index === this.steps.length - 1;
+      this.updatePlayButton();
+      this.drawEdges();
+    }
+
+    private drawEdges() {
+      const board = this.querySelector<HTMLElement>('.sg-flow-board');
+      const svg = this.querySelector<SVGSVGElement>('.sg-flow-edges');
+      if (!board || !svg) return;
+      const bounds = board.getBoundingClientRect();
+      if (!bounds.width) return;
+      svg.setAttribute('viewBox', `0 0 ${bounds.width} ${bounds.height}`);
+      const pairs = [['ingress', 'scheduler'], ['scheduler', 'engine'], ['engine', 'gpu'], ['gpu', 'reconcile'], ['reconcile', 'scheduler'], ['reconcile', 'egress']];
+      const currentEdges = this.steps[this.index].edges;
+      let markup = '';
+      for (const [from, to] of pairs) {
+        const a = this.querySelector(`[data-flow-node="${from}"]`)!.getBoundingClientRect();
+        const b = this.querySelector(`[data-flow-node="${to}"]`)!.getBoundingClientRect();
+        const ax = a.left - bounds.left + a.width / 2, ay = a.top - bounds.top + a.height / 2;
+        const bx = b.left - bounds.left + b.width / 2, by = b.top - bounds.top + b.height / 2;
+        let path: string;
+        if (from === 'reconcile' && to === 'scheduler' && Math.abs(ax - bx) < 8 && Math.abs(ay - by) > 150) {
+          const right = bounds.width - 2;
+          path = `M${a.right - bounds.left + 2},${ay} H${right} V${by} H${b.right - bounds.left + 5}`;
+        } else if (Math.abs(ay - by) < 8) {
+          const sign = Math.sign(bx - ax);
+          path = `M${ax + sign * (a.width / 2 + 2)},${ay} H${bx - sign * (b.width / 2 + 5)}`;
+        } else {
+          const sign = Math.sign(by - ay);
+          const y1 = ay + sign * (a.height / 2 + 2), y2 = by - sign * (b.height / 2 + 5);
+          path = `M${ax},${y1} V${(y1+y2)/2} H${bx} V${y2}`;
+        }
+        const key = `${from}-${to}`, active = currentEdges.includes(key);
+        markup += `<path data-edge="${key}" d="${path}" fill="none" stroke="${active ? '#2e608f' : '#b2b8c0'}" stroke-width="${active ? '2' : '1.3'}" marker-end="url(#${this.uid}-${active ? 'active-' : ''}arrow)"/>`;
+      }
+      svg.querySelector('.sg-edge-paths')!.innerHTML = markup;
+    }
+
+    private animateEdges() {
+      cancelAnimationFrame(this.frame);
+      const particle = this.querySelector<SVGCircleElement>('.sg-particle');
+      if (!particle) return;
+      particle.setAttribute('visibility', 'hidden');
+      if (this.motion.matches || document.hidden) return;
+      const keys = this.steps[this.index].edges;
+      if (!keys.length) return;
+      const began = performance.now();
+      const duration = 1500;
+      const tick = (now: number) => {
+        const progress = (now - began) / duration;
+        if (progress >= 1 || !this.isConnected) { particle.setAttribute('visibility', 'hidden'); return; }
+        const edgeIndex = Math.min(keys.length - 1, Math.floor(progress * keys.length));
+        const path = this.querySelector<SVGPathElement>(`[data-edge="${keys[edgeIndex]}"]`);
+        if (path) {
+          const point = path.getPointAtLength(path.getTotalLength() * ((progress * keys.length) % 1));
+          particle.setAttribute('cx', String(point.x));
+          particle.setAttribute('cy', String(point.y));
+          particle.setAttribute('visibility', 'visible');
+        }
+        this.frame = requestAnimationFrame(tick);
+      };
+      this.frame = requestAnimationFrame(tick);
+    }
+  }
+  if (!customElements.get('my-sglang-explorer')) customElements.define('my-sglang-explorer', MySglangExplorer);
+</script>
+
+<style is:global>
+  .prose .sg-static-figure { margin:28px 0; }
+  .prose .sg-static-scroll { overflow-x:auto; border-top:1px solid #cbd1d7; border-bottom:1px solid #cbd1d7; background:#fff; }
+  .prose .sg-static-scroll img { display:block; width:100%; min-width:700px; margin:0; border:0; border-radius:0; }
+  .prose .sg-static-figure figcaption { margin:10px 0 0; font-size:12px; line-height:1.8; color:#5f6975; }
+  my-sglang-explorer.sg-widget { display:block; margin:32px 0; color:#29313a; font-size:14px; line-height:1.65; font-family:inherit; --sg-line:#cbd1d7; --sg-blue:#2e608f; --sg-muted:#5f6975; }
+  my-sglang-explorer.sg-widget *, my-sglang-explorer.sg-widget *::before, my-sglang-explorer.sg-widget *::after { box-sizing:border-box; }
+  my-sglang-explorer.sg-widget .sg-panel { border-top:2px solid #48505a; border-bottom:1px solid var(--sg-line); padding:20px 0; background:#fff; }
+  my-sglang-explorer.sg-widget h3, my-sglang-explorer.sg-widget h4, my-sglang-explorer.sg-widget p, my-sglang-explorer.sg-widget dl, my-sglang-explorer.sg-widget dd { margin:0; }
+  my-sglang-explorer.sg-widget h3 { font-size:17px; line-height:1.5; letter-spacing:0; font-weight:600; }
+  my-sglang-explorer.sg-widget h4 { font-size:15px; line-height:1.6; font-weight:600; }
+  my-sglang-explorer.sg-widget .sg-figure-head { display:flex; justify-content:space-between; align-items:baseline; gap:12px; padding:0 16px; }
+  my-sglang-explorer.sg-widget .sg-figure-head > span { font-size:11px; color:var(--sg-muted); }
+  my-sglang-explorer.sg-widget .sg-intro { font-size:12px; margin:9px 16px 19px; color:var(--sg-muted); }
+  my-sglang-explorer.sg-widget .sg-diagram-scroll { overflow-x:auto; padding:4px 0; }
+  my-sglang-explorer.sg-widget .sg-architecture { display:block; width:100%; min-width:700px; font-family:inherit; }
+  my-sglang-explorer.sg-widget .sg-svg-title { font-size:14px; font-weight:600; fill:#29313a; }
+  my-sglang-explorer.sg-widget .sg-svg-sub { font-size:11px; fill:#5f6975; }
+  my-sglang-explorer.sg-widget .sg-svg-label { font-size:12px; fill:#384451; font-weight:600; }
+  my-sglang-explorer.sg-widget .sg-module { cursor:pointer; }
+  my-sglang-explorer.sg-widget .sg-module rect { fill:#fff; stroke:#737e89; stroke-width:1; }
+  my-sglang-explorer.sg-widget .sg-module:hover rect { fill:#f2f6fa; stroke:var(--sg-blue); }
+  my-sglang-explorer.sg-widget .sg-module[aria-pressed='true'] rect { fill:#eaf2f9; stroke:var(--sg-blue); stroke-width:2; }
+  my-sglang-explorer.sg-widget [data-module='mtp'] rect { stroke-dasharray:5 3; }
+  my-sglang-explorer.sg-widget .sg-process-boundary { fill:#fff; stroke:#89929b; stroke-dasharray:6 4; }
+  my-sglang-explorer.sg-widget .sg-engine-boundary { fill:#f8fafc; stroke:#87919d; }
+  my-sglang-explorer.sg-widget .sg-device-boundary { fill:#f5f8fb; stroke:#87919d; }
+  my-sglang-explorer.sg-widget .sg-arch-edge, my-sglang-explorer.sg-widget .sg-arch-dependency { fill:none; stroke:#48505a; stroke-width:1.2; }
+  my-sglang-explorer.sg-widget .sg-arch-dependency { stroke-dasharray:4 3; }
+  my-sglang-explorer.sg-widget :is(button,select,[tabindex]):focus-visible { outline:2px solid #2e608f; outline-offset:3px; }
+  my-sglang-explorer.sg-widget .sg-module-detail { margin:18px 16px 0; padding-top:14px; border-top:1px solid var(--sg-line); }
+  my-sglang-explorer.sg-widget .sg-detail-heading { display:flex; justify-content:space-between; align-items:baseline; gap:12px; margin-bottom:8px; }
+  my-sglang-explorer.sg-widget .sg-origin { font-size:10px; color:var(--sg-muted); flex-shrink:0; }
+  my-sglang-explorer.sg-widget .sg-module-detail > p { font-size:12px; line-height:1.85; }
+  my-sglang-explorer.sg-widget dl { display:grid; gap:5px; margin:10px 0 !important; font-size:12px; }
+  my-sglang-explorer.sg-widget dl > div { display:grid; grid-template-columns:32px 1fr; gap:8px; }
+  my-sglang-explorer.sg-widget dt { color:var(--sg-muted); }
+  my-sglang-explorer.sg-widget .sg-detail-note { border-left:2px solid #d39a60; padding:7px 10px; background:#fffaf5; }
+  my-sglang-explorer.sg-widget .sg-source { display:flex; gap:5px 8px; flex-wrap:wrap; margin-top:10px; font-size:10px; }
+  my-sglang-explorer.sg-widget .sg-source > span { width:100%; color:var(--sg-muted); }
+  my-sglang-explorer.sg-widget .sg-panel code { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:10px; overflow-wrap:anywhere; padding:2px 4px; background:#f3f5f7; color:#394655; border:0; border-radius:0; }
+  my-sglang-explorer.sg-widget .sg-caption { margin:15px 16px 0; font-size:11px; color:var(--sg-muted); line-height:1.75; }
+  my-sglang-explorer.sg-widget .sg-flow-toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0 16px 22px; }
+  my-sglang-explorer.sg-widget .sg-flow-toolbar label { display:flex; align-items:center; gap:10px; font-size:12px; }
+  my-sglang-explorer.sg-widget select { max-width:100%; min-width:0; border:1px solid var(--sg-line); border-radius:0; background:#fff; color:#29313a; font:inherit; font-size:12px; padding:8px; }
+  my-sglang-explorer.sg-widget .sg-phase { font-size:11px; color:var(--sg-blue); }
+  my-sglang-explorer.sg-widget .sg-flow-board { position:relative; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); grid-template-areas:'ingress scheduler engine' 'egress reconcile gpu'; gap:34px; margin:0 16px 20px; }
+  my-sglang-explorer.sg-widget .sg-flow-edges { position:absolute; inset:0; width:100%; height:100%; overflow:visible; pointer-events:none; z-index:1; }
+  my-sglang-explorer.sg-widget .sg-flow-node { position:relative; z-index:2; min-width:0; border:1px solid #87919d; padding:12px; background:#fff; }
+  my-sglang-explorer.sg-widget .sg-flow-node-ingress { grid-area:ingress; }
+  my-sglang-explorer.sg-widget .sg-flow-node-scheduler { grid-area:scheduler; }
+  my-sglang-explorer.sg-widget .sg-flow-node-engine { grid-area:engine; }
+  my-sglang-explorer.sg-widget .sg-flow-node-gpu { grid-area:gpu; }
+  my-sglang-explorer.sg-widget .sg-flow-node-reconcile { grid-area:reconcile; }
+  my-sglang-explorer.sg-widget .sg-flow-node-egress { grid-area:egress; }
+  my-sglang-explorer.sg-widget .sg-flow-node.is-active { background:#eaf2f9; border-color:var(--sg-blue); border-width:2px; padding:11px; }
+  my-sglang-explorer.sg-widget .sg-flow-num { display:block; font-size:10px; color:var(--sg-muted); margin-bottom:5px; }
+  my-sglang-explorer.sg-widget .sg-flow-node strong { display:block; font-size:13px; font-weight:600; }
+  my-sglang-explorer.sg-widget .sg-flow-node small { display:block; margin-top:4px; font-size:10px; color:var(--sg-muted); }
+  my-sglang-explorer.sg-widget .sg-flow-registers { display:grid; grid-template-columns:1fr 1fr; margin:0 16px 18px; border-top:1px solid var(--sg-line); border-bottom:1px solid var(--sg-line); }
+  my-sglang-explorer.sg-widget .sg-flow-registers > div { padding:9px 10px; min-width:0; display:flex; flex-direction:column; gap:4px; }
+  my-sglang-explorer.sg-widget .sg-flow-registers > div + div { border-left:1px solid var(--sg-line); }
+  my-sglang-explorer.sg-widget .sg-flow-registers span { font-size:10px; color:var(--sg-muted); }
+  my-sglang-explorer.sg-widget .sg-flow-registers strong { font-size:12px; font-weight:500; }
+  my-sglang-explorer.sg-widget .sg-controls { display:flex; gap:8px; flex-wrap:wrap; margin:0 16px; }
+  my-sglang-explorer.sg-widget button { font:inherit; color:inherit; border-radius:0; }
+  my-sglang-explorer.sg-widget .sg-controls button { border:1px solid #aeb7c1; padding:9px 13px; background:#fff; font-size:12px; min-height:40px; cursor:pointer; }
+  my-sglang-explorer.sg-widget .sg-controls button:hover:not(:disabled) { background:#f1f6fa; border-color:var(--sg-blue); }
+  my-sglang-explorer.sg-widget .sg-controls button:disabled { opacity:.4; cursor:default; }
+  my-sglang-explorer.sg-widget .sg-controls .sg-play { min-width:95px; display:flex; justify-content:space-between; gap:18px; border-color:var(--sg-blue); background:#eaf2f9; }
+  my-sglang-explorer.sg-widget .sg-progress-row { display:flex; align-items:center; gap:12px; margin:15px 16px 18px; }
+  my-sglang-explorer.sg-widget progress { appearance:none; display:block; width:100%; flex:1; height:3px; border:0; border-radius:0; background:#e4e9ef; color:var(--sg-blue); }
+  my-sglang-explorer.sg-widget progress::-webkit-progress-bar { background:#e4e9ef; }
+  my-sglang-explorer.sg-widget progress::-webkit-progress-value { background:var(--sg-blue); }
+  my-sglang-explorer.sg-widget progress::-moz-progress-bar { background:var(--sg-blue); }
+  my-sglang-explorer.sg-widget [data-progress] { font-size:10px; color:var(--sg-muted); min-width:40px; text-align:right; }
+  my-sglang-explorer.sg-widget .sg-step-detail { margin:0 16px; min-height:146px; }
+  my-sglang-explorer.sg-widget .sg-step-detail p { font-size:12px; color:var(--sg-muted); margin:8px 0 12px; line-height:1.85; }
+  my-sglang-explorer.sg-widget .sg-step-detail code { display:block; border-left:2px solid var(--sg-blue); padding:8px 10px; font-size:11px; }
+  my-sglang-explorer.sg-widget .sg-stream { margin:15px 16px 0; border-top:1px solid var(--sg-line); padding-top:10px; display:flex; gap:12px; font-size:11px; }
+  my-sglang-explorer.sg-widget .sg-stream-label { flex-shrink:0; color:var(--sg-muted); }
+  @media(max-width:600px) {
+    my-sglang-explorer.sg-widget .sg-figure-head { align-items:start; flex-direction:column; gap:5px; }
+    my-sglang-explorer.sg-widget .sg-flow-board { gap:26px; }
+    my-sglang-explorer.sg-widget .sg-flow-node { padding:9px; }
+    my-sglang-explorer.sg-widget .sg-flow-node.is-active { padding:8px; }
+    my-sglang-explorer.sg-widget .sg-flow-node strong { font-size:12px; }
+    my-sglang-explorer.sg-widget .sg-detail-heading { align-items:start; flex-direction:column; gap:4px; }
+  }
+  @media(max-width:460px) {
+    my-sglang-explorer.sg-widget .sg-flow-board { grid-template-columns:1fr; grid-template-areas:'ingress' 'scheduler' 'engine' 'gpu' 'reconcile' 'egress'; gap:22px; padding-right:14px; }
+    my-sglang-explorer.sg-widget .sg-flow-node { display:grid; grid-template-columns:25px 1fr; padding:9px 12px; }
+    my-sglang-explorer.sg-widget .sg-flow-node.is-active { padding:8px 11px; }
+    my-sglang-explorer.sg-widget .sg-flow-num { grid-row:1/3; margin-top:2px; }
+    my-sglang-explorer.sg-widget .sg-flow-node small { margin-top:1px; }
+    my-sglang-explorer.sg-widget .sg-flow-toolbar label { flex-direction:column; align-items:start; gap:5px; }
+    my-sglang-explorer.sg-widget .sg-flow-registers { grid-template-columns:1fr; }
+    my-sglang-explorer.sg-widget .sg-flow-registers > div + div { border-left:0; border-top:1px solid var(--sg-line); }
+    my-sglang-explorer.sg-widget .sg-controls { display:grid; grid-template-columns:1fr 1fr; }
+    my-sglang-explorer.sg-widget .sg-controls .sg-play { min-width:0; }
+    my-sglang-explorer.sg-widget .sg-step-detail { min-height:195px; }
+  }
+  @media print { my-sglang-explorer.sg-widget .sg-controls, my-sglang-explorer.sg-widget .sg-flow-toolbar { display:none; } my-sglang-explorer.sg-widget .sg-diagram-scroll { overflow:visible; } }
+</style>
