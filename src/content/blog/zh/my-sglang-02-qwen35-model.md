@@ -1,6 +1,6 @@
 ---
-title: "My_Sglang（二）：Qwen3.5 的模型结构与逐步接入"
-description: "从 Gated Attention、Gated DeltaNet 与 MTP 的张量计算出发，详细还原配置解析、通用算子、严格权重加载、混合状态、分块推理和引擎接入，并检查真实回归证据的边界。"
+title: "My_Sglang（二）：从读懂模型到 Day 0 支持，再到逐步优化"
+description: "复盘 Qwen3.5 接入 My_Sglang 的实际过程：先读配置、权重与参考实现，建立通用算子和最小推理闭环，再接入请求状态、MTP，依据 profile 逐项融合并验证收益。"
 date: 2026-09-24T00:00:00Z
 lang: zh
 translationKey: my-sglang-02-qwen35-model
@@ -8,216 +8,111 @@ tags: [LLM 推理, 模型适配, Qwen3.5, My_Sglang]
 draft: true
 ---
 
-[第一篇](/zh/blog/my-sglang-01-architecture/)介绍了 My_Sglang 的模块边界。这一篇进入模型接入：当一个模型同时包含 Attention、卷积和循环状态时，怎样把它变成能被 mini-sglang 调度、续写和回收的执行对象？
+给一个推理框架增加新模型支持，入口通常很小：在注册表里加一个类名。但真正开始做的时候，很快就会遇到更具体的问题：权重能否直接映射到已有层，模型需要保存哪些历史状态，第二次 forward 从哪里继续，以及框架原来的调度与缓存假设是否仍然成立。
 
-我们以实际接入的 **Qwen3.5-4B 文本路径**为例。先拆开网络的张量计算，再沿配置、算子、权重、状态、Engine 和 MTP 的依赖顺序解释实现。文中的「我们做了什么」依据本分支代码与实验记录；有些实现已通过局部测试，有些组合仍未通过完整验收，两者会分别标明。
+这篇文章复盘我们如何把 **Qwen3.5-4B 的文本路径接入 My_Sglang**。讲解顺序沿着实现依赖推进：先确定差异，写出通用计算，跑通最小生成闭环，再让框架管理请求，最后从测量结果决定下一项优化。模型结构会在影响实现决策时展开。
 
-本文固定模型 revision 为 `851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a`，代码观察点为 `566bf693`。后续文档提交没有改变这里分析的模型代码。维度取自[该 revision 的官方配置](https://huggingface.co/Qwen/Qwen3.5-4B/blob/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a/config.json)，计算细节以仓库中 `models/qwen3_5.py` 与 `kernel/qwen35_reference.py` 为准；下文源码路径均相对 `python/minisgl/`。
-
-## 1. 先确定接入对象：文本主干、视觉编码器与 MTP
-
-官方 checkpoint 的顶层架构名是 `Qwen3_5ForConditionalGeneration`，包含视觉编码器、语言模型和 MTP 参数。此次实现读取文本配置、加载文本与 MTP 权重，将架构名映射到我们自己的 `Qwen3_5ForCausalLM`。前向计算由 My_Sglang 执行，Transformers 模型用于独立正确性对照。
-
-这个范围对应文本输入输出、BF16 主计算路径和 TP=1。视觉输入、多模态位置编码、任意长上下文都需要额外适配；官方模型的能力不能直接算作本引擎已具备的能力。[官方模型说明](https://huggingface.co/Qwen/Qwen3.5-4B)提供了网络概览及原生 MTP 使用说明。
-
-### 1.1 32 层如何排列
-
-4B 的文本主干是 dense 网络。每组包含三个 Gated DeltaNet 层和一个 Gated Attention 层，重复八次。按从零开始的层号，full attention 出现在 `3, 7, 11, …, 31`，其余 24 层是 GDN。每层后面都有 dense FFN，不能把家族介绍中的 MoE 概念套到这个配置上。
+文中的 **Day 0** 指「最小原生离线推理闭环」：真实权重能够严格加载，prefill/decode 能连续执行，固定用例与独立参考对齐。它是本文给一个里程碑取的名字，不表示发布当天完成适配，也不代表全部功能已经验收。实际 Git 中，模型与 Engine、调度、MTP 的初版曾一起提交；下面按依赖拆开讲，保留真实提交和测量粒度。
 
 <figure class="sg-static-figure">
-<div class="sg-static-scroll" tabindex="0" role="region" aria-label="Qwen3.5-4B 文本主干与 MTP 结构，窄屏可横向滚动">
-<img src="/images/my-sglang/qwen35-blocks.svg" alt="32 层文本主干由三个 GDN 和一个 Gated Attention 重复八次构成；每层包含两次 pre-norm residual，MTP 使用独立层并共享 embedding 与输出 head。" loading="lazy" />
+<div class="sg-static-scroll" tabindex="0" role="region" aria-label="从模型审计到 Day 0 与逐项优化的接入路线，窄屏可横向滚动">
+<img src="/images/my-sglang/qwen35-support-roadmap.svg" alt="配置、权重和参考代码形成差异清单，经过通用算子、Day 0 最小推理、请求状态与 MTP 接入，再进入 profile、单项修改、正确性和性能对照的循环。" loading="lazy" />
 </div>
-<figcaption>图 1：本次接入的网络范围。蓝色表示主干计算，橙色表示独立 MTP 路径。MTP 使用自己的 decoder 与状态。<a href="/images/my-sglang/qwen35-blocks.svg" target="_blank" rel="noopener">查看完整 SVG</a>。</figcaption>
+<figcaption>图 1：本文沿着这条接入路线展开。箭头表示实现依赖，不表示各步骤的实际耗时。所有机制图由项目内容重画，绘画风格参考 <a href="https://vllm.ai/blog/2025-09-05-anatomy-of-vllm">Inside vLLM</a> 的白底手绘线条、彩色描边与短标签。<a href="/images/my-sglang/qwen35-support-roadmap.svg" target="_blank" rel="noopener">查看完整 SVG</a>。</figcaption>
 </figure>
 
-为避免后续公式混淆，令 `N` 表示本次 packed forward 的总 token 数，`D` 表示 hidden size，`L` 表示一个请求已消费的 token 数。
+本文基于代码观察点 `566bf693`，固定模型 revision 为 `851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a`。下文代码路径相对 `python/minisgl/`，实验文件相对 `docs/experiments/qwen35-sm120/results/`。测量都是此前 5090 实验的留存，本轮写作没有重新执行 GPU benchmark。
 
-| 参数 | 4B 配置 | 对实现的影响 |
-| --- | ---: | --- |
-| Hidden size `D` | 2560 | 层间残差与 embedding 的宽度 |
-| 词表 | 248320 | embedding 权重 `[248320, 2560]` |
-| 主干层数 | 32 | 24 层 GDN、8 层 full attention |
-| Attention Q / KV heads | 16 / 4 | 分组查询，需要对应的 head 映射 |
-| Attention head dimension | 256 | Q 合并后为 4096 维，再投影回 2560 |
-| Rotary dimension | 64 | 每个 Q/K head 仅前四分之一旋转 |
-| GDN QK / V heads | 16 / 32 | Q/K 展开到 32 个 heads |
-| GDN key / value dimension | 128 / 128 | 每个 head 的循环状态为 `128×128` |
-| 卷积宽度 | 4 | 每层保留原始投影的短窗口 |
-| FFN intermediate size | 9216 | 两路升维，再经乘法与降维 |
-| MTP trained layers | 1 | 反复使用同一预测模块展开候选 |
+## 1. 接到模型以后，先读什么
 
-这里第一个容易继承错误的假设是 `head_dim = hidden_size / num_heads`。`2560 / 16 = 160`，但此模型明确配置了 `head_dim=256`。Attention 内部宽度可以与 residual stream 宽度不同，投影矩阵负责二者之间的转换。
+我先把检查对象分成三份：**配置描述结构，checkpoint 描述实际参数，参考实现描述计算顺序。** 三者结合，才能判断哪些地方可以沿用框架，哪些地方必须补。
 
-### 1.2 两类 decoder 共用什么
+### 1.1 先从 config 建立一张差异清单
 
-`_DecoderLayer` 共用同一个 pre-norm residual 外壳，仅替换 `Mixer`：
+第一份是[固定 revision 的官方 config.json](https://huggingface.co/Qwen/Qwen3.5-4B/blob/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a/config.json)。顶层 architecture 是 `Qwen3_5ForConditionalGeneration`，真正的语言模型参数放在 `text_config` 中。看到 `vision_config` 后，我们先明确文本支持范围，避免把视觉编码、图像 token 与多模态位置编码一起卷入首轮适配。
 
-```text
-u       = x + Mixer(Norm_in(x))
-x_next  = u + MLP(Norm_post(u))
+沿着 `text_config` 看下去，最影响实现的并不是参数量，而是以下差异：
 
-Mixer ∈ {Gated DeltaNet, Gated Attention}
-```
+| 读到的配置 | 对接入的直接影响 |
+| --- | --- |
+| `layer_types`：三个 linear attention 后接一个 full attention，重复八次 | 32 层不能全部实例化成同一种 Attention；其中 24 层需要 GDN 状态 |
+| `hidden_size=2560`、`head_dim=256`、Q heads=16 | Attention 内部宽度为 4096，不能用 `2560/16=160` 推算 head dimension |
+| `partial_rotary_factor=0.25` | Q/K 每个 head 只旋转前 64 维，后 192 维保留 |
+| GDN QK heads=16、V heads=32，维度均为 128，卷积宽度=4 | 新增 QK 分组展开、短卷积窗口和 FP32 循环矩阵 |
+| `tie_word_embeddings=true` | 输出 head 复用 `[248320,2560]` 的 embedding 权重 |
+| `mtp_num_hidden_layers=1` | checkpoint 自带预测模块；后续可以接原生 MTP，无需训练新预测头 |
 
-这使我们可以分别验收两个 token mixer，同时共享 FFN、残差和层间连接。`_TextModel` 顺序执行 32 层，最后执行 final norm。输出 head 与 token embedding 共享权重，`[N,2560]` 的 hidden 经同一张 `[248320,2560]` 权重表映射成 logits。
+这个 4B 配置是 dense 网络。每层的 FFN 都是 `2560 → 9216 → 2560` 的 SwiGLU；它不需要专家路由。主干包含 24 个 GDN mixer 与 8 个 gated full-attention mixer，二者共用 pre-norm residual 和 FFN 外壳。
 
-## 2. 共享部件也有数值约定：RMSNorm 与 SwiGLU
+<figure class="sg-static-figure">
+<div class="sg-static-scroll" tabindex="0" role="region" aria-label="本次模型接入需要处理的网络差异，窄屏可横向滚动">
+<img src="/images/my-sglang/qwen35-blocks.svg" alt="Qwen3.5-4B 的共享 embedding、32 层混合主干和 tied head；24 层 GDN 保存卷积及循环状态，8 层 gated attention 保存 KV，MTP 使用独立预测层和状态。" loading="lazy" />
+</div>
+<figcaption>图 2：审计配置后得到的模型地图。这里标出的是接入需要处理的差异，模型能力范围仍以文本路径为限。<a href="/images/my-sglang/qwen35-blocks.svg" target="_blank" rel="noopener">查看完整 SVG</a>。</figcaption>
+</figure>
 
-复用已有层之前，先核实参数语义。这里一般 RMSNorm 的可学习参数表示相对单位缩放的增量，实际乘数为 `1 + weight`：
+### 1.2 再看 checkpoint，验证配置在权重里长什么样
 
-```python
-y = x.float()
-y = y * torch.rsqrt(y.square().mean(-1, keepdim=True) + eps)
-out = (y * (1.0 + weight.float())).to(x.dtype)
-```
+第二份是 safetensors 中的参数名、shape 与 dtype。此时要核对的是：文本权重位于哪个前缀，Q 投影是否带输出 gate，GDN 的投影和状态参数叫什么，MTP 参数是否真的存在，以及 tied head 是否还有一份独立权重。
 
-均方、倒平方根、权重加一与乘法都在 FP32 完成，最后转回输入 dtype。这个 `_Norm` 用于 decoder 的两处 norm、Attention 的 Q/K norm、文本 final norm，以及 MTP 的输入 norm。若把 checkpoint 的 `weight` 直接传给通常的 `x_normalized * weight` 实现，即使张量形状完全匹配，结果也已经改变。
+我们最终采用的映射是 `model.language_model.* → model.*`，保留 `mtp.*`，按文本支持范围跳过 `model.visual.*`。hybrid 分支限定 TP=1，先绕过已有加载器面向其他模型的 QKV 合并与分片逻辑，让本地对象名称与 checkpoint 直接对应。
 
-FFN 使用 SwiGLU，三个无 bias 投影分别为：
+这一步还应记录 dtype。后面首次严格加载恰恰因为漏掉两类 FP32 参数而失败；shape 对了，不代表参数声明已经完整。
 
-```text
-gate = linear(x, W_gate)                W_gate: [9216,2560]
-up   = linear(x, W_up)                  W_up:   [9216,2560]
-out  = linear(silu(gate) * up, W_down)   W_down: [2560,9216]
-```
+### 1.3 最后沿参考 forward 追踪状态和舍入
 
-本文统一按 PyTorch 的 `[out_features, in_features]` 表示权重存储形状。通用路径保留三个投影；合并 gate/up、融合激活或更换 GEMM 是后续可独立比较的优化，而模型接入阶段先固定计算语义。
+第三份是 Qwen/Transformers 的参考计算。我们重点核对调用顺序，而不是只抄模块类名：
 
-GDN 输出处还有另一种 gated RMSNorm，它直接乘 `weight`，并且有额外的 BF16 中间舍入。它需要单独实现，后面会具体展开。
+- Attention 的 Q 与 gate 如何排列，Q/K norm 在 RoPE 前还是后。
+- causal conv 保存输入还是输出，分块后要保留多宽的窗口。
+- GDN 先衰减还是先更新，输出读取旧状态还是新状态。
+- 哪些计算转 FP32，哪些位置必须先舍入回 BF16。
+- MTP 的 token 与 hidden 是否错开一位，使用哪份 hidden。
 
-## 3. Gated Attention：投影布局、部分 RoPE 与带历史的 mask
+对应到 mini-sglang，要回头阅读 `ModelConfig`、模型注册、`BaseOP` 权重加载、`Engine.forward_batch` 和 `Req.cached_len`。此时得到的接入清单是：补混合配置、写两种 mixer、加载真实参数、定义完整请求状态，再连接 Engine。已有的 HTTP 与调度骨架可以沿用，但新的状态生命周期需要明确接上。
 
-### 3.1 Q 与输出 gate 按 head 交织存储
+### 1.4 在独立环境中固定这个起点
 
-输入 `x` 的形状是 `[N,2560]`。Q 投影同时产生 query 和输出门控，因此其输出宽度翻倍：
+实验从上游 `20fcd7f` 建立新分支和独立 worktree，避开远端已有的未提交修改。GPU 实测为 RTX 5090、SM120。环境使用专用 venv；系统 Python 缺少 ensurepip 时，改用已有 uv 创建隔离环境，关闭 system-site-packages。记录软件版本与模型哈希，后续每次更换算子都使用同一模型快照。
 
-```text
-q_proj(x): [N,8192] = [N,16,2×256]
-k_proj(x): [N,1024] = [N,4,256]
-v_proj(x): [N,1024] = [N,4,256]
-```
+这一阶段还修正了 SM120 与 SM100 的能力判断：同属 Blackwell 不能自动选择同一后端。我们先使用通用 PyTorch CUDA 路径，使第一轮模型支持不依赖某个专用 kernel 恰好能运行。
 
-代码先 reshape，再拆分每个 head 内部的 Q 和 gate：
+## 2. 开始写代码：先补配置，再建立可对照的通用计算
 
-```python
-qg = q_proj(x).view(N, 16, 512)
-q, gate = qg.chunk(2, dim=-1)  # 二者均为 [N,16,256]
-```
+### 2.1 配置改动保持薄，先把结构传进来
 
-这个顺序由 checkpoint 布局决定。直接把 `[N,8192]` 切成前后两半，会把不同 head 的 query 与 gate 混在一起。两种写法最后都能得到相同 shape，只有检查布局和数值才能发现问题。
+`e8c60a6` 扩展 `ModelConfig`，增加 `layer_types`、GDN heads/dimensions/conv width、MTP 层数，并读取 partial RoPE。嵌套 `text_config` 展开与显式 `head_dim` 的处理已经存在，这里沿用并核对，新增贡献是把混合模型缺失的信息继续传到构造函数。
 
-Q/K 先经过各自的 `_Norm`，再执行 RoPE。gate 不经过 Q norm 或 RoPE，保留到 Attention 输出后使用。
+配置测试同时覆盖新模型和已有 dense 路径：新模型应得到 64 维 RoPE、正确的层类型与 GDN 参数；已有模型仍保留原来的 RoPE 配置。这样后续 shape 错误可以尽早定位到配置或层构造，避免全部堆到真实权重加载阶段。
 
-### 3.2 仅旋转前 64 维
+### 2.2 先写 reference 算子，并明确谁拥有状态
 
-配置中的 `partial_rotary_factor=0.25` 与 `head_dim=256` 给出 `rotary_dim=64`，基数为 `10,000,000`。每个 head 拆成旋转部分和保留部分：
+`4f501ec` 加入三个通用算子。卷积与递推显式接收旧状态并返回新状态，gated norm 则是无状态变换：
 
 ```text
-x_rot  = x[..., :64]
-x_tail = x[..., 64:]          # 后 192 维原样保留
-inv_freq[i] = base^(-2i/64)   # i = 0,…,31
-angle[p,i]  = position[p] * inv_freq[i]
+causal_conv1d(x, weight, initial_state)        → output, next_conv
+recurrent_gated_delta_rule(..., initial_state) → output, next_recurrent
+rms_norm_gated(output, z, weight)              → gated_output
 ```
 
-`x_rot` 再按前后两半构造 `rotate_half(x_rot)`，与重复展开的 cos/sin 相乘后拼回 `x_tail`。频率和角度在 FP32 构造，cos/sin 转为输入 dtype 后参与计算。
+它们使用 PyTorch 张量运算，在输入所在设备执行。GPU 实验中，输入、状态和计算均在 CUDA 上；初版没有硬件特化和自动调优。
 
-分块输入时，第二块的位置必须从已消费长度继续。例如第一块消费 `[0,64)`，第二块应使用 `64,65,…`，不能重新从零开始。文本路径采用一维绝对位置；官方配置还包含多模态 RoPE 字段，但我们没有据此实现视觉 token 的空间或时间位置。
+我们让算子不原地覆盖传入的旧状态。GDN 从旧 state 的 clone 开始，卷积返回独立的新窗口。模型层决定何时替换请求持有的状态；算子不需要知道请求 UID。这既便于检查连续性，也让后续 MTP 能丢弃临时分支。
 
-### 3.3 GQA 展开与输出门控
+### 2.3 写 GDN 时，先把递推翻译成可以逐行对照的代码
 
-通用实现把 4 个 K/V heads 各重复 4 次，与 16 个 Q heads 对齐，然后调用 PyTorch SDPA。真实缓存仍保存 4 个 K/V heads；展开是本轮计算的中间张量。
+GDN 的输入由四路投影产生：qkv 为 `[N,8192]`，z 为 `[N,4096]`，a/b 各为 `[N,32]`，其中 N 是本轮总 token 数。qkv 经过宽度 4 的 depthwise causal conv 和 SiLU，再拆成 Q、K、V；z 与 a/b 不经过卷积。
 
-缩放因子取完整的 `head_dim`：`256^(-1/2)=1/16`，而非 rotary dimension 的平方根。Attention 输出形状为 `[N,16,256]`，先乘 `sigmoid(gate)`，再展平为 `[N,4096]`，经 `o_proj` 返回 residual stream 的 `[N,2560]`。
+卷积缓存保存最近四个**卷积之前的投影输入**。计算下一块时把旧窗口与当前输入拼接，执行卷积并取当前块对应的最后 T 个输出，再保存末尾四个原始输入。若保存成 SiLU 后的结果，第一块可能正常，第二块就会对错误的历史继续卷积。
 
-这层有输出 gate，但不会因此改变历史 K/V 的定义。KV Cache 保存经过 K norm/RoPE 的 K 与投影得到的 V，gate 只作用于本轮 Attention 的输出。
-
-### 3.4 非方形 causal mask 是续写正确性的关键
-
-已有 `P` 个历史 token，新 chunk 有 `T` 个 token。Q 长度为 `T`，拼接后的 K/V 长度为 `P+T`。当前 chunk 的第 `i` 个 query 对应全局位置 `P+i`，允许访问的 key 满足 `j ≤ P+i`：
-
-```python
-rows = torch.arange(T, device=device)[:, None] + P
-cols = torch.arange(P + T, device=device)[None, :]
-mask = cols <= rows
-```
-
-例如 `P=3, T=2`，布尔 mask 应为：
+Q/K 原有 16 个 heads，各重复两份，与 V 的 32 个 heads 对齐。每个 head 的 recurrent state 为 `128×128`，按 key 轴、value 轴组织。对 Q/K 做 L2 normalization，query 再乘 `128^(-1/2)`；衰减和更新门为：
 
 ```text
-                K0 K1 K2 K3 K4
-Q at position 3  1  1  1  1  0
-Q at position 4  1  1  1  1  1
+β = sigmoid(b)
+g = -exp(A_log) * softplus(a + dt_bias)
 ```
 
-本实现区分三种情况：无历史的 prefill 使用 causal attention；有历史且 `T>1` 时显式构造上述偏移 mask；有历史的普通单 token decode 可以访问现有缓存全部位置。这样同一层才能同时处理首次输入、后续 chunk 与逐 token 续写。
-
-## 4. Gated DeltaNet：从局部卷积到循环记忆
-
-GDN 的主要历史信息保存在一个固定大小矩阵中，而非为每个过去 token 保留 K/V。理解它需要同时追踪短卷积窗口和循环状态；两者丢失任意一个，后续 token 的计算都会改变。
-
-### 4.1 四条输入投影承担不同职责
-
-`_GatedDeltaNet` 从 `[N,2560]` 的输入计算：
-
-| 投影 | 输出形状 | 后续用途 |
-| --- | --- | --- |
-| `in_proj_qkv` | `[N,8192]` | Q/K/V 的局部卷积输入 |
-| `in_proj_z` | `[N,4096]` | 最终输出的 SiLU gate |
-| `in_proj_b` | `[N,32]` | 经 sigmoid 得到更新强度 β |
-| `in_proj_a` | `[N,32]` | 与 A_log、dt_bias 计算衰减 |
-
-8192 维可以拆为 `2048 + 2048 + 4096`，分别对应 `16×128` 的 Q、`16×128` 的 K，以及 `32×128` 的 V。只有 qkv 路径经过卷积，z、a、b 不经过该卷积。
-
-### 4.2 卷积状态必须保存卷积之前的输入
-
-qkv 转为 `[1,8192,T]`，执行宽度为 4 的 depthwise causal convolution，再应用 SiLU。depthwise 表示每个通道拥有自己的时间卷积核，通道之间不在这一步混合。
-
-`causal_conv1d` 的接口显式接收旧窗口，并返回新窗口：
-
-```python
-mixed, next_conv = causal_conv1d(
-    qkv_segment.T.unsqueeze(0),     # [1,8192,T]
-    conv_weight[:, 0],             # [8192,4]
-    initial_state=old_conv,         # [1,8192,4]
-)
-```
-
-旧窗口保存最近 4 个 **pre-convolution inputs**，从旧到新排列。实现把它与新 qkv 拼接，做卷积后截取最后 `T` 个输出，再保存拼接序列的最后 4 个输入。按照参考缓存约定多保留一个最旧样本，并不意味着每个输出使用了 5 个输入。
-
-若缓存的是卷积结果或 SiLU 结果，下一块就会再次对已经变换过的数值执行卷积。首次 prefill 可能正常，第二个 chunk 才出现误差，这也是单次 forward 测试不足以验收模型支持的原因。
-
-### 4.3 GDN 展开的是 Q/K heads
-
-卷积输出拆分后，Q/K 是 `[1,T,16,128]`，V 是 `[1,T,32,128]`。我们将每个 Q/K head 重复两次，匹配 32 个 value heads。
-
-这里容易与上一节的 GQA 混淆：full attention 展开 KV 去匹配 Q；GDN 展开 Q/K 去匹配 V。两条路径中相同的 `repeat_interleave` 对应不同的 head 关系，不能共用未经检查的 reshape 规则。
-
-### 4.4 先遗忘，再纠正，再读取
-
-每个 head 的状态 `S` 形状为 `[128,128]`，行轴是 key dimension，列轴是 value dimension。门控参数为：
-
-```text
-β_t = sigmoid(b_t)
-g_t = -exp(A_log) * softplus(a_t + dt_bias)
-α_t = exp(g_t)
-```
-
-`g` 是 log-decay，真正乘到历史状态上的衰减是 `exp(g)`。代码以 FP32 计算 `A_log.exp()`、`a.float()` 和 softplus 路径；β 的 sigmoid 先使用投影结果的 dtype，进入递推时再转 FP32。因此准确的说法是循环累计使用 FP32，而不是整层 GDN 的所有操作均使用 FP32。
-
-Q/K 先做 L2 normalization，query 额外乘 `128^(-1/2)`。令归一化后的 key 为 `k̂_t`，额外缩放后的 query 为 `q̄_t`，每个 head 的更新为：
-
-```text
-S_decay = α_t · S_previous
-memory  = k̂_tᵀ · S_decay                  # [128]，对 key 轴归约
-delta   = β_t · (v_t - memory)             # [128]
-S_next  = S_decay + outer(k̂_t, delta)     # [128,128]
-y_t     = q̄_tᵀ · S_next                  # [128]
-```
-
-这组顺序给出了 delta rule 的具体含义：先按衰减率保留历史，再查询当前 key 在记忆中对应的 value，用真实 value 与记忆的差修正状态，最后从更新后的状态读取输出。把 memory 改成从未衰减的旧状态计算，或让输出读取更新前的状态，都会改变模型。
-
-通用算子对应的核心代码很短：
+每个 token 的计算按以下顺序落地：
 
 ```python
 state = state * g[:, t].exp()[..., None, None]
@@ -227,168 +122,141 @@ state = state + k_t.unsqueeze(-1) * delta.unsqueeze(-2)
 output[:, t] = (state * q_t.unsqueeze(-1)).sum(-2)
 ```
 
-这里 state、memory、delta 与 output buffer 都是 FP32，返回输出时再转回 query dtype。Q/K 的 L2 normalization 则遵循参考实现，在输入 dtype 中完成相应张量运算后才转 FP32；本文的数学式描述依赖关系，实际数值对齐还必须保留这个转换顺序。
+这段代码把容易混淆的语义固定下来：memory 从衰减后的历史读取；delta 修正当前 key 对应的 value；输出从更新后的 state 读取。循环累计与 state 使用 FP32，输出再转回输入 dtype。Q/K normalization 遵循参考路径的输入 dtype 运算顺序，不能把整层简单概括为“全 FP32”。
 
-### 4.5 Gated RMSNorm 的一次中间舍入也属于模型语义
+### 2.4 接 Attention 时，先解决布局，再解决历史访问
 
-递推输出与 z 都整理成 `[N,32,128]`，按每个 value head 的 128 维执行 gated norm：
-
-```python
-dtype = y.dtype
-normalized = y.float()
-normalized *= torch.rsqrt(normalized.square().mean(-1, keepdim=True) + eps)
-weighted = weight * normalized.to(dtype)
-out = (weighted * F.silu(z.float())).to(dtype)
-```
-
-与第二节的一般 norm 相比，这里有两点变化：直接乘 `weight`，且归一化结果在乘权重之前先转回输入 dtype。此 checkpoint 的 gated norm weight 本身为 FP32，乘法后会进入 FP32，再乘 FP32 的 SiLU gate，最后转回 BF16。
-
-把所有操作连续保持在 FP32、仅在出口做一次 BF16 cast，可能在数学上更接近实数结果，却不再复现参考路径的舍入。接入阶段我们先保留这种顺序，后续融合算子也以它作为对照。最后将 `[N,32,128]` 展平成 `[N,4096]`，通过 `out_proj` 回到 2560 维。
-
-## 5. MTP 的网络组成：带一位输入偏移的独立 decoder
-
-官方已经提供 MTP 权重，本次工作不涉及训练预测头。本地 `_MTPModel` 包含两个输入 norm、一个 `5120→2560` 的 FC、一层 full attention decoder、一个 final norm，并复用主干的 embedding 和输出 head。
-
-令 `x[t+1]` 是下一个位置的 token，`h[t]` 是上一个位置的 hidden：
-
-```text
-embedding = shared_embedding(x[t+1])
-joined    = concat(Norm_embedding(embedding), Norm_hidden(h[t]))
-u         = linear(joined, W_fc)             W_fc: [2560,5120]
-draft_h   = MTP_final_norm(MTP_decoder(u))
-logits    = linear(draft_h, shared_embedding_weight)
-```
-
-拼接顺序是 embedding 在前、hidden 在后。MTP 层虽然在其局部列表中编号为 0，但使用独立 `Qwen35State` 保存 Attention KV，不会写入主干第 0 层的状态。
-
-当前控制器传入的是主干 **final norm 之后的 `hidden_states`**。模型也返回 `hidden_states_before_norm`，但这条 MTP 路径没有使用它。这里明确记录实现事实；对官方完整 MTP 数值行为的对齐，仍受后文回归结果约束。
-
-单层 MTP 可以重复调用，第一次用 target hidden，后续候选展开使用前一次的 draft hidden。配置中的“一层训练模块”与运行时“候选生成几步”因而是两个参数。真正把这些候选变成可靠输出，还需要目标验证和状态提交，第十节继续展开。
-
-## 6. 第一步接入：让配置与注册准确描述模型
-
-理解网络之后，第一项代码改动是把结构信息带进引擎。`e8c60a6` 为 `ModelConfig` 增加混合层、GDN 和 MTP 字段，并读取 partial RoPE。这个阶段先核对已有解析，再补齐模型信息：
-
-1. **沿用并核对 `text_config` 展开。** hidden size、层布局等来自嵌套文本配置，已有解析保留顶层 architecture 信息，用于模型注册。
-2. **沿用并核对显式 `head_dim`。** 已有逻辑仅在缺失时回退到常见的除法规则，此模型依赖显式值 256。
-3. **携带完整 `layer_types`。** 模型按配置逐层构建 GDN 或 full attention，不在前向里猜测层类型。
-4. **分开 rotary dimension 与 head dimension。** 读取 `rope_parameters` 的 base 与 partial factor，而非默认旋转整个 head。
-5. **携带 GDN 的四个 head 参数与卷积宽度。** 这些参数决定投影、状态形状和后续内存预算。
-
-`tests/core/test_qwen35_config.py` 同时检查混合配置与已有 dense 配置：前者应得到 rotary dimension 64、正确的 MTP/GDN 字段，后者仍保留原有 RoPE 行为。模型注册随后在集成提交中加入，将 checkpoint 的 conditional-generation 名称连接到文本实现。
-
-这一层适配很薄，但它规定了后续每个矩阵和缓存的形状。配置解析错误应当在这里暴露，而不是等加载数 GB 权重后才靠矩阵乘法报错发现。
-
-## 7. 第二步接入：先建立通用 GPU 算子与对照接口
-
-`4f501ec` 引入 `qwen35_reference.py` 和相应微基准、profiler 工具。第一版使用 PyTorch 张量算子，按输入所在设备执行；在 5090 实验中输入和计算都在 CUDA 上。通用路径没有依赖 SM120 特定指令，也没有预先把所有操作融合成一个 kernel。
-
-卷积与递推显式接收旧状态、返回新状态；gated norm 是无状态变换。三个接口分别为：
-
-```text
-causal_conv1d(x, weight, initial_state)      -> output, next_conv
-recurrent_gated_delta_rule(..., initial_state) -> output, next_recurrent
-rms_norm_gated(output, z, weight)            -> gated_output
-```
-
-卷积和递推不会原地覆盖调用者传入的旧状态。递推从 `initial_state.float().clone()` 开始；卷积的新窗口也拥有独立存储。这让测试能比较旧状态是否变化，也为后续投机分支的丢弃提供基础。模型层负责把返回状态写回请求；算子本身不认识 UID、调度器或 HTTP 请求。
-
-测试先覆盖 shape、dtype、初始状态、连续执行以及分块等价关系，再与独立参考递推比较。实际留存的 GPU 通用算子测试为 **30/30 通过**；另有真实 GDN 形状的 8 组比较，覆盖 `B∈{1,4}`、`T∈{1,16}`、FP32/BF16，head 数 32、key/value dimension 128，记录中输出与最终 state 的最大绝对误差均为 0。
-
-这些数字只描述该算子集合和这些输入，不意味着整个模型在所有 batch 下 bitwise invariant。开发时 CPU BF16 分块测试曾遇到向量化 `rsqrt` 随调用形状变化产生的舍入差异。为单独检查递推连续性，相应测试对共享输入预先归一化，避免把归一化形状差异与状态递推错误混在一起；完整算子的数值测试仍单独保留。
-
-从这里开始才有清楚的优化基线：输入、旧状态和输出契约固定，profiler 可以把开销定位到投影、卷积、归约、逐元素运算或状态复制。后续 GDN 融合和 SM120 tile/warp 实验属于执行优化，不能回写成第一版模型已经具备的能力。
-
-## 8. 第三步接入：严格加载 441 个文本与 MTP 权重键
-
-配置和局部算子就绪后，`0e3bbf4` 集成了文本模型、MTP 与请求生命周期等改动。这个提交包含多个文件；下文按依赖关系拆解其实现，不把每个讲解步骤虚构成独立 Git 提交。
-
-### 8.1 先建立参数外壳，再接入 checkpoint
-
-模型继承项目已有的 `BaseOP`，通过对象层级形成参数名，例如 `model.layers.3.self_attn.q_proj.weight`。加载脚本先在 meta device 上建立参数外壳，获得预期 shape/dtype，再把真实权重装入，避免先分配一份随机初始化的完整 GPU 模型。
-
-hybrid 分支的权重映射为：
-
-| Checkpoint 名称 | 本地处理 |
-| --- | --- |
-| `model.language_model.*` | 改为 `model.*` |
-| `model.visual.*` | 按文本支持范围跳过 |
-| `mtp.*` | 保留，加载到独立 MTP 模块 |
-| 独立 `lm_head.weight` | tied 配置不创建该参数 |
-
-该分支要求 TP=1，并绕开原有面向其他模型的 QKV 合并与张量切分流程。这样 Q/gate 的布局、GDN 投影名称与形状能直接对照 checkpoint。`BaseOP.load_state_dict` 消费每个预期键，检查 shape/dtype，并在末尾拒绝未消费的键。
-
-### 8.2 首次失败来自 FP32 参数
-
-最初严格加载遇到 dtype 不匹配：checkpoint 中的 `A_log` 和 `linear_attn.norm.weight` 是 FP32，而最初的参数声明随默认 dtype 成为了 BF16。
-
-修复是让 `_GatedDeltaNet.A_log` 与 `_GatedNorm.weight` 显式声明 FP32，保持它们的数值语义。当前 Engine 加载时按每个预期参数的 dtype 转换；独立基线加载脚本直接用 checkpoint dtype 做严格检查。两条入口都需要保留这些 FP32 声明，不能通过整模型统一转 BF16 来绕过问题。
-
-### 8.3 441 个键如何反推
-
-加载成功不仅可以看一个 count，还可以从结构反算：
-
-| 来源 | 每份键数 | 份数 | 合计 |
-| --- | ---: | ---: | ---: |
-| GDN decoder | 14 | 24 | 336 |
-| Full attention decoder | 11 | 8 | 88 |
-| 文本 embedding 与 final norm | — | — | 2 |
-| 单层 MTP 模块 | — | — | 15 |
-| **总计** | | | **441** |
-
-一个 GDN decoder 包含 qkv/z/a/b 四个投影、卷积、A_log、dt_bias、gated norm、out projection，再加两处 decoder norm 和三个 FFN 投影，共 14 个键。一个 full attention decoder 有 q/k/v/o、q_norm/k_norm，再加两处 decoder norm 与三个 FFN 投影，共 11 个键。MTP 则在一个 11-key decoder 外增加 FC、两个输入 norm 和 final norm，共 15 个键。
-
-这与首轮记录中的 441 相符，但键数本身不能证明数值正确；真正的结构检查仍是每个键的名称、shape、dtype 和共享关系。这里的完整性指所声明的文本与 MTP 范围，视觉权重没有被纳入。
-
-## 9. 第四步接入：让模型跨 chunk、跨轮次、跨请求继续执行
-
-能对完整 prompt 算一次 logits，只完成了无状态接口的一部分。推理引擎会反复调用模型，每次只提供新增 token；因此模型必须明确“当前状态已经消费到哪里”。
-
-### 9.1 一个请求有三类持久状态
-
-`Qwen35State` 的核心字段为：
+Q 投影同时产生 query 与输出 gate。它输出 `[N,8192]`，需要先按 head reshape，再在每个 head 内拆分：
 
 ```python
-length: int
-position_offset: int
-kv: dict[layer_id, tuple[K, V]]
-conv: dict[layer_id, conv_window]
-recurrent: dict[layer_id, recurrent_matrix]
+qg = q_proj(x).view(N, 16, 512)
+q, gate = qg.chunk(2, dim=-1)   # 均为 [N,16,256]
 ```
 
-普通文本主干的 `position_offset=0`。单请求、BF16 权重路径下，三类张量分别为：
+直接对 8192 维切成两半，最终 shape 也可能正确，但每个 head 的 Q/gate 对应关系已经改变。随后 Q/K 各自做 norm，只对前 64 维执行 RoPE，后 192 维保持原值。K/V 的四个 heads 各重复四份去匹配 16 个 Q heads。
 
-| 状态 | 每层形状 | 层数与增长方式 |
+我们先调用 PyTorch SDPA，scale 使用完整 head dimension 的 `256^(-1/2)`。输出乘 `sigmoid(gate)`，展平成 4096 维，再经输出投影回到 2560。真实 KV 仍保存四个 heads，展开是计算中间结果。
+
+### 2.5 两类 norm 分开实现，避免错误复用
+
+一般 `_Norm` 在 FP32 归一化后乘 `1 + weight`，最后转回输入 dtype。GDN 的 gated norm 则直接乘 weight，而且中间需要一次 BF16 舍入：
+
+```python
+x = hidden.float()
+x = x * torch.rsqrt(x.square().mean(-1, keepdim=True) + eps)
+x = weight * x.to(hidden.dtype)
+out = (x * F.silu(gate.float())).to(hidden.dtype)
+```
+
+这里的 cast 是后续融合必须保留的边界。把全部步骤保持 FP32 到最后，虽然仍然像同一条数学公式，却已经换了浮点执行路径。
+
+共享的 decoder 外壳则很直接：
+
+```text
+u      = x + mixer(input_norm(x))
+x_next = u + down_proj(silu(gate_proj(post_norm(u))) * up_proj(post_norm(u)))
+```
+
+在完整模型加载前，通用 GPU 算子测试已经 **30/30 通过**；独立 HF GDN 对照覆盖 B=1/4、T=1/16、FP32/BF16 共八组，记录中输出与最终 state 最大绝对误差均为 0。这一步确认的是指定算子的计算和状态契约，尚未证明整个模型行为。
+
+开发中还遇到 CPU BF16 `rsqrt` 的形状相关舍入：整段和分块调用出现 1 ULP 差异。我们将“归一化数值”和“后续递推连续性”分开检查，保留失败轨迹；GPU 仍测试完整 normalization 加递推路径。这个区分避免了为了让测试变绿而模糊比较对象。
+
+## 3. 完成 Day 0：严格加载，再跑通 prefill → decode
+
+### 3.1 用 BaseOP 构建原生模型，而不是调用 HF generate
+
+我们沿用 mini 的 `BaseOP` 组织 `_TextModel`、`_DecoderLayer`、`_Attention`、`_GatedDeltaNet`、`_MLP`，在注册表里将 checkpoint 的架构名映射到本地 `Qwen3_5ForCausalLM`。模型先在 meta device 建立参数外壳，再加载真实张量，避免先分配一份随机初始化的完整 GPU 权重。
+
+`BaseOP.load_state_dict` 逐个消费预期键，检查 shape/dtype，最后拒绝剩余键。我们的目标是让结构不匹配在启动时明确失败。
+
+首次加载确实失败了：checkpoint 中 `A_log` 与 `linear_attn.norm.weight` 为 FP32，而最初参数声明随默认 dtype 成了 BF16。修复是显式声明这两类参数为 FP32，并让 Engine 按各参数的预期 dtype 加载；没有把所有参数统一降为 BF16。
+
+### 3.2 用 441 个键做结构自检
+
+文本与 MTP 权重最终严格加载了 441 个键，可以从网络结构反推：
+
+| 部分 | 键数推导 |
+| --- | ---: |
+| 24 个 GDN decoder | 24 × 14 = 336 |
+| 8 个 Attention decoder | 8 × 11 = 88 |
+| 文本 embedding 与 final norm | 2 |
+| 单层 MTP：FC、两个输入 norm、decoder、final norm | 15 |
+| 合计 | **441** |
+
+GDN 的 14 个键包含四个输入投影、conv、A_log、dt_bias、gated norm、out projection，再加两处 decoder norm 和三个 FFN 投影。Attention 层的 11 个键则由 q/k/v/o、Q/K norm、两处 decoder norm 和三个 FFN 投影组成。tied embedding 不额外创建 LM head 权重。
+
+441 只是结构交叉检查，完整性仍取决于每个键的名称、shape、dtype；这里也只覆盖声明支持的文本与 MTP 范围。
+
+### 3.3 先用一段最小循环隔离模型问题
+
+我先通过 `forward_tokens` 做离线生成，让一个 state 贯穿 prompt 与后续 token。核心逻辑如下，实际测试脚本还包含计时同步、预热和结果保存：
+
+```python
+state = Qwen35State()
+out = model.forward_tokens(prompt_ids, state=state)  # 消费整个 prompt
+generated = []
+
+for step in range(output_tokens):
+    token = out.logits[-1].argmax().view(1)
+    generated.append(token)
+    if step + 1 < output_tokens:
+        out = model.forward_tokens(token, state=state)
+```
+
+这时需要检查的不只是文本是否像一句话，还包括：logits 是否有限、state 长度是否正确增长、下一轮是否真正消费上一轮选出的 token、重复运行是否一致。首个输出来自 prompt 末尾的 logits；它刚被选出时尚未进入 state，下一次 forward 才消费它。
+
+第二次 smoke 还暴露了测试脚本自身的问题：tokenizer 返回的对象不是脚本预期的 Tensor，调用 `numel` 失败。我们改成先用 chat template 生成文本，再显式取得 `return_tensors="pt"` 的 input IDs，避免将客户端 API 错误误判为模型计算失败。
+
+### 3.4 什么证据允许我们跨过这个里程碑
+
+首轮 `02-model/smoke/model.json` 保存了：真实 441 键加载、32-token 输入/16-token 输出的三轮重复一致，以及一个固定聊天用例的前 16 个 greedy token 与独立 HF 模型一致。到这里，我们把它称为 Day 0 最小闭环通过，继续扩展框架接口。
+
+这里有一条后来的审计勘误：首轮虽记录 `chunked_greedy_equal=true`，但输入只有 32 tokens，脚本 chunk size 是 64，实际仍只有一块。真正的跨块证据来自后续 512-token 输入分成八个 64-token 块的实验。Day 0 smoke 不能提前承担它没有触发的验收。
+
+这些实现与 Engine、scheduler、MTP 初版最后一起保存在 `0e3bbf4`，不是一串人为拆分的独立 Day 0 提交。
+
+## 4. 让框架真正接管请求：状态、分块、批次与 MTP
+
+离线循环明确了模型的输入输出。下一步是把这组约定接到 mini 的请求生命周期，让调度器每轮只提供新增 token，并让模型找到正确的历史。
+
+### 4.1 先把三类历史放进同一个请求状态
+
+`Qwen35State` 包含 `length`、`position_offset`，以及按层保存的 `kv`、`conv`、`recurrent`。一个普通请求的主要张量为：
+
+| 状态 | 每层形状 | 特点 |
 | --- | --- | --- |
-| Attention K、V | 各 `[L,4,256]`，BF16 | 8 层，随已消费长度增长 |
-| 卷积窗口 | `[1,8192,4]`，BF16 | 24 层，固定窗口 |
-| GDN recurrent | `[1,32,128,128]`，FP32 | 24 层，固定矩阵 |
+| K、V | 各 `[L,4,256]`，BF16；8 层 | 随已消费 token 数 L 增长 |
+| 卷积窗口 | `[1,8192,4]`，BF16；24 层 | 固定窗口，保存卷积前输入 |
+| GDN recurrent | `[1,32,128,128]`，FP32；24 层 | 固定大小，保存递推后的记忆 |
 
-由此可以计算主干基础状态的理论字节数。每层 recurrent 为 2 MiB，24 层共 48 MiB；卷积窗口共 1.5 MiB；8 层 K/V 每个历史 token 合计 32 KiB：
-
-```text
-主干状态 ≈ 49.5 MiB + L × 32 KiB
-L = 8192 时：49.5 MiB + 256 MiB = 305.5 MiB / 请求
-```
-
-这是按张量形状计算的基础存储量，未计入权重、MTP、验证副本、动态拼接临时张量、Graph staging 与 allocator。它说明并发准入还需要预留每请求的固定 GDN 状态，不能只用每 token KV 字节数推算容量。
-
-### 9.2 Chunked Prefill 只改变本轮消费区间
+按形状计算，主干基础状态约为 `49.5 MiB + L×32 KiB`。这未计入临时张量、MTP 分支、Graph staging 与 allocator，但足以说明准入时还要给每个请求预留固定 GDN 状态，不能只按 KV token 数估算容量。
 
 <figure class="sg-static-figure">
-<div class="sg-static-scroll" tabindex="0" role="region" aria-label="分块输入与逐 token 续写的混合状态连续性，窄屏可横向滚动">
-<img src="/images/my-sglang/qwen35-state-continuation.svg" alt="同一请求依次消费两个 prefill chunk 和一个 decode token，KV 追加、卷积窗口滚动、GDN 状态继续递推；槽位复用由请求 UID 与长度检查保护。" loading="lazy" />
+<div class="sg-static-scroll" tabindex="0" role="region" aria-label="请求跨块续写与状态归属，窄屏可横向滚动">
+<img src="/images/my-sglang/qwen35-state-continuation.svg" alt="两个 prefill 块与后续 decode 依次消费 token，KV 追加、卷积窗口滚动、GDN 矩阵继续递推；已输出 pending 与已消费状态分开计数，槽位复用检查 UID。" loading="lazy" />
 </div>
-<figcaption>图 2：状态长度等于已经被模型消费的前缀长度。每个阶段都需要延续 KV、卷积与 recurrent 三类状态。区间是机制示例。<a href="/images/my-sglang/qwen35-state-continuation.svg" target="_blank" rel="noopener">查看完整 SVG</a>。</figcaption>
+<figcaption>图 3：实现状态接口时需要同时维护的三条历史。token 小块表示逻辑位置，不是物理 KV 页；当前实现使用请求独立的动态 KV。<a href="/images/my-sglang/qwen35-state-continuation.svg" target="_blank" rel="noopener">查看完整 SVG</a>。</figcaption>
 </figure>
 
-第一块输入结束后，Attention 保存这段前缀的 K/V；卷积留下末尾窗口；GDN 保存最后的 recurrent matrix。第二块携带同一个 state，从 `state.length + position_offset` 生成位置：Attention 读取过去的 K/V，卷积读取过去的原始投影窗口，GDN 从过去的矩阵继续更新。所有层完成本轮计算后，`state.length` 增加本轮 token 数。
+### 4.2 分块不是重复做几次独立 prefill
 
-普通 decode 则是同样接口下长度为 1 的输入。首个输出 token 由 prompt 最后位置的 logits 选出，此时它已生成，但尚未进入模型状态。下一轮消费它之后，状态长度才增加。因此“已经输出多少 token”和“状态已经消费多少 token”不能混为一个计数。
+第一块结束后，下一块必须使用同一个 state。位置从 `state.length + position_offset` 开始，Attention 读取历史 KV，卷积带上旧窗口，GDN 从旧矩阵继续更新。
 
-### 9.3 Packed forward 共用计算，但保持请求状态隔离
+Attention 还有一个具体修改：已有 P 个历史 token，当前块有 T 个 token，第 i 行 query 能看到的 key 满足 `j ≤ P+i`。代码显式建立偏移 mask：
 
-`forward_packed` 接收一维 token 数组与分段长度。例如一个 3-token prefill chunk 与一个单 token decode 可以表示为：
+```python
+rows = torch.arange(T, device=device)[:, None] + P
+cols = torch.arange(P + T, device=device)[None, :]
+mask = cols <= rows
+```
+
+例如 P=3、T=2，两行分别允许看到 key `0…3` 和 `0…4`。直接从左上角画一个没有历史偏移的三角，会把合法历史遮掉。普通单 token decode 已有 past 时，现有缓存中的位置全部合法。
+
+后来 `03-gated-norm/model-reference/model.json` 的 512-token 输入真正跨越八个 64-token 块，分块前 16 个输出与整段路径一致。这是首批实际跨块证据，范围仍然有限。
+
+### 4.3 将多个请求展平，但不混合它们的历史
+
+`forward_packed` 接收 `input_ids`、`lengths`、每请求一个 state 和对应 positions。例如三 token 的输入块与一个 decode token 可以打成：
 
 ```text
 input_ids = [a0, a1, a2, b0]
@@ -397,149 +265,181 @@ states    = [state_A, state_B]
 positions = [L_A, L_A+1, L_A+2, L_B]
 ```
 
-embedding、norm、线性投影与 FFN 在总 token 轴上一起执行；Attention 和 GDN 在各层内部按分段分别读取、推进对应 state，再把输出拼回原顺序。请求 A 的末尾不会成为请求 B 的卷积历史，B 也不会看到 A 的 KV。
+投影、norm 和 FFN 在总 token 轴上共用计算；Attention/GDN 按请求片段读取和更新各自历史。入口拒绝两个请求共享同一个可变 state，默认只返回每段最后位置的 logits，MTP 验证则可以要求所有位置的 logits。
 
-入口检查 token 数是否等于 `sum(lengths)`、每段是否非空、state 数量是否一致，并拒绝两个请求共用同一个可变 state 对象。默认输出每段最后位置的 logits，供普通采样使用；MTP 验证可以要求返回所有位置的 logits。
+Scheduler 通过 `Engine.forward_batch` 进入模型 `forward()`。模型维护 `_request_states[table_idx]=(uid,state)`：新请求创建空状态，UID 不匹配报错，`state.length` 必须等于 `Req.cached_len`。请求结束或取消时释放对应状态，在存在在途执行时建立必要的 stream 依赖，再让槽位被新请求使用。
 
-因此当前实现已经具有变长 packed 计算接口，但 Attention/GDN 仍按请求执行。多请求进入一次模型调用，不代表其全部计算已合并成一个 GPU kernel。
+我们没有把这一步包装成已完成统一 Paged KV。当前 hybrid 路径的真实 KV 由模型动态追加，Engine 的 `kv_cache=None`，页表与页预算仍服务于调度和容量管理。当前路径限定 TP=1、page_size=1、naive prefix cache；只有 KV 相同而没有对应卷积/GDN state，不能恢复一个正确前缀。
 
-### 9.4 接入 mini 的 Request 与 Engine
+### 4.4 MTP 权重加载了，还需要写候选与提交过程
 
-普通路径由 Scheduler 调用 `Engine.forward_batch`，再进入模型的 `forward()`；模型从当前 `Context.batch` 取得请求及输入。每个请求通过 `_request_states[table_idx] = (uid, state)` 绑定混合状态：
+MTP 初版与模型一起接入。其网络先分别归一化下一位置的 token embedding 与上一位置的 hidden，再拼接，经 `[2560,5120]` 的 FC、一层独立 full-attention decoder、final norm 和共享 head 产生预测。当前控制器传入 target final norm 后的 `hidden_states`；这是一条明确的实现选择，完整数值对齐仍须回归。
+
+Prefill priming 使用 `input_ids[1:]` 配 `target.hidden_states[:-1]`，MTP 的 `position_offset=1`，因此其状态长度比 target 少一。跨块时还要将上一块最后的 hidden 留给新块第一个 token，不能在每块各自做切片后丢掉边界配对。
+
+`GreedyMTPController` 在临时状态上展开候选，再让 target 在另一份 clone 上验证 `[pending,candidates…]`。接受的是连续匹配前缀。若出现拒绝，GDN state 无法像 token 数组一样切掉末尾，我们从旧 target state 重放真正接受的输入前缀，再用真实 target hidden teacher-force 待提交的 MTP state。
+
+所有新状态与待发布 hidden 准备完毕，才统一替换 session 引用；输出为接受前缀加 target bonus，bonus 成为下一轮 pending。在线适配还要更新 token pool、释放拒绝后缀的预留量，并在一个输出块内部处理 EOS 与长度预算。
+
+`04-mtp/mtp.json` 的早期短回归覆盖 B=1/3、普通/k=1/k=3、每配置三轮，共 18 条 batch-run，输出与对应普通路径一致。但它只有三个短聊天提示，固定生成 32 tokens、忽略 EOS。我们把它当作状态提交的早期检查，后面的真实 HTTP 子集仍然发现了严格对齐问题。
+
+## 5. Day 0 以后，先用 profile 找下一项改动
+
+参考路径可运行之后，性能问题才有可以比较的对象。通用算子阶段已经采过局部 trace；模型跑通后，我们给每层、token mixer 与 MLP 加 `record_function` 标记，另外采一轮 native decode 的 CPU/CUDA trace。
+
+这时我同时看两件事：GPU 时间集中在哪里，以及 CPU 在向 GPU 发射多少碎小操作。只看总 token/s，无法判断应该改投影、递推、状态搬运还是提交方式。
+
+<figure class="sg-static-figure">
+<div class="sg-static-scroll" tabindex="0" role="region" aria-label="首轮真实 decode 的 kernel 热点，窄屏可横向滚动">
+<img src="/images/my-sglang/qwen35-day0-profile.png" alt="由实际 Chrome trace 重绘的 kernel 热点图，两个 GEMV 家族占据主要累计执行时间，其余包含转换、归约与逐元素运算。" loading="lazy" />
+</div>
+<figcaption>图 4：此前真实 trace 的统计重绘，保持测量图原貌。首轮记录有 2777 个 GPU kernels；这是 kernel 累计执行时间分布，不是完整生成延迟。<a href="/images/my-sglang/qwen35-day0-profile.png" target="_blank" rel="noopener">查看原图</a>。</figcaption>
+</figure>
+
+这份单步 trace 中，GPU kernel 累计约 9.172 ms，两个 GEMV 家族约 5.892 ms，占 64.2%。同时，转换、归约、逐元素操作产生了大量启动。它提示投影很重要，也说明可以先选择一个数值边界清楚的小区域，验证融合是否真的能传导到模型收益。
+
+第一项选择是 gated RMSNorm：它只有明确的归约、权重和 SiLU gate，没有跨 token 状态依赖，适合先验证融合方法。这个选择不是预先承诺它一定改善整体延迟。
+
+正式比较时，profiler 与 benchmark 分开运行。Profiler 有记录与注入开销；CUDA event 包住一串 Python 发射时，也可能包含 stream 等待主机的空洞。模型对照使用同形状预热后的无 profiler 三轮生成，并分别保存 prefill、decode 与完整离线生成时间。
+
+下面两项 A/B 都固定 B=1、输入 512、生成 128 tokens、相同模型/输入哈希和 greedy 路径。完整离线生成包含 prefill、127 次后续 decode 与 token 选择，排除权重加载、HTTP、排队和网络。每项优化重新测自己的 reference；三轮均值和样本标准差见表，原始样本摘录可[直接查看 JSON](/data/my-sglang/qwen35-stages.json)。
+
+## 6. 第一次融合：局部变快以后，模型却没有收益
+
+`qwen35_fused.py` 让一个 Triton program 处理一行 gated norm，将均方、rsqrt、权重乘法与 SiLU gate 合在一次调用中。实现保留 normalization 转回输入 dtype 的位置；对非 FP32 权重，还保留乘权重之后相应的舍入，并设置 `enable_fp_fusion=False`。
+
+我没有同时更换 GDN recurrence。这样回归出问题时只需检查一个替换边界，性能变化也能归属于这一项开关：`MINISGL_QWEN35_GATED_NORM=reference|triton`。
+
+局部测试 12/12 通过。B=1/T=1 的微基准 CUDA event 区间中位数从 54.606 μs 到 9.918 μs；单次 trace 的结构从 12 个 kernels 变为 1 个。接下来仍需重新跑完整模型：
+
+| 指标，ms | Reference：三轮均值 ± 标准差 | 融合 gated norm | 观察 |
+| --- | ---: | ---: | --- |
+| Prefill | 516.042 ± 0.651 | 521.302 ± 0.659 | 没有下降 |
+| Decode | 1769.918 ± 4.760 | 1796.328 ± 14.073 | 没有下降 |
+| 完整离线生成 | 2285.960 ± 5.274 | 2317.630 ± 14.565 | 耗时约增加 1.385% |
+
+两条路径的三轮 128-token 输出相同，各自分块输入的前 16-token 输出也相同。另一次模型 trace 确认 24 层确实执行了融合 kernel，排除了「开关没生效」这种简单解释。
+
+因此我们保留实现与测量，默认仍为 reference。两组模型实验分进程运行、没有交错 A/B，约 1.4% 的回退不能凭这组数据归因于某一种缓存或硬件行为。能确定的是：这次没有获得模型收益，微基准的约 5 倍提升不能写成模型加速。
+
+这项负结果决定了下一步仍然要做独立实验，而不是将多个融合一起打开再挑一个更好的总数。
+
+## 7. 第二次融合：把 GDN 的时间递推留在一个 kernel 内
+
+### 7.1 这次改变的是状态读写与发射方式
+
+reference GDN 在 Python 中沿 T 个 token 循环，每个 token 再调用若干逐元素和归约操作。它清楚地表达了公式，却会不断发射 kernel，并把中间 state 物化成张量。T 增大时，这种执行方式的成本迅速累积。
+
+`ce8acc4` 引入通用 Triton recurrence。我们先固定真实形状 K=V=128，使用 `value_tile=32, num_warps=4`。一个 program 对应一个 batch/head/value tile，持有 `128×32` 的 FP32 状态块，沿 token 顺序在 kernel 内执行归一化、衰减、memory 归约、delta、outer-product 更新和 query 读取。
+
+<figure class="sg-static-figure">
+<div class="sg-static-scroll" tabindex="0" role="region" aria-label="gated norm 与 GDN recurrence 的独立融合方法，窄屏可横向滚动">
+<img src="/images/my-sglang/qwen35-fusion-process.svg" alt="gated norm 将多个运算融合但保留 BF16 舍入边界；GDN 按 value 列分块，完整 key 轴参与归约，一个 program 沿时间推进状态，通用实现与后续 SM120 参数扫描分开。" loading="lazy" />
+</div>
+<figcaption>图 5：两项独立融合的实现方法。方框表示计算与数据归属，不表示实测时间比例；投影、卷积及输出投影仍在 recurrence kernel 之外。<a href="/images/my-sglang/qwen35-fusion-process.svg" target="_blank" rel="noopener">查看完整 SVG</a>。</figcaption>
+</figure>
+
+为什么沿 value 轴切？每个 value 列的更新都需要对完整 key 轴求 memory/query 归约，但不同 value 列可以独立处理。按 value 列分块能保留完整 K 轴，把并行性放在 batch、head 和 value tile 上。token 之间仍有递推依赖，不能随意并行重排。
+
+初始 state 只读，最终 state 另行分配，保留 reference 的所有权约定。Q/K normalization 也在 kernel 内，但显式保留 BF16 的 square、sum 结果、加 epsilon、rsqrt、multiply 等转换边界；没有把“全 FP32 重写”当作原路径的等价替换。
+
+这仍是一个通用 Triton 实现，没有使用 SM120 专属指令。其他不满足支持条件的形状回退 reference，投影、因果卷积、门控参数准备、输出 norm 与 out projection 仍由原路径执行。
+
+### 7.2 先通过数值检查，再回到完整生成
+
+23 项 GPU 测试覆盖 B=1/4/8、T=1/16/65、FP32/BF16、非零初态、分块和回退，全部通过预设容差。最大 BF16 输出绝对差为 `0.0001220703125`，最大 state 绝对差约 `1.7881393e-7`；这是容差内一致，不是逐 bit 相同。
+
+模型实验只切换 `MINISGL_QWEN35_GDN`，gated norm 保持 reference，并重新测基线。当前代码的 GDN 默认仍为 reference，融合路径需要显式启用，尚未按这一个负载的结果全局打开：
+
+| 指标，ms | Reference：三轮均值 ± 标准差 | GDN Triton | 耗时下降 |
+| --- | ---: | ---: | ---: |
+| Prefill | 512.128 ± 0.858 | 42.210 ± 0.039 | 91.758% |
+| Decode | 1761.840 ± 4.195 | 1540.485 ± 22.505 | 12.564% |
+| 完整离线生成 | 2273.968 ± 5.009 | 1582.695 ± 22.496 | **30.399%** |
+
+Reference 三轮完整生成为 `2271.372 / 2270.791 / 2279.743 ms`，融合路径为 `1608.604 / 1571.362 / 1568.119 ms`。融合第一轮较慢，仍计入统计。两路径三轮 128-token 输出一致；分块前 16-token 一致；融合路径另有固定聊天 16-token 与 HF 的比较。
+
+这里 prefill 的大幅下降有明确的比较对象：我们移除了通用 PyTorch 逐 token、多次发射的主要成本。它不能解释为超过成熟项目的并行 GDN prefill，也不能推广成所有请求快 30%。获得证据的是这个普通单请求、512/128 的离线负载，MTP/HTTP/Graph 组合仍需单独测。
+
+### 7.3 再看一次 profile，确认优化发生在哪里
+
+<figure class="sg-static-figure">
+<div class="sg-static-scroll" tabindex="0" role="region" aria-label="GDN 融合后的实际 CPU 与 GPU 时间线，窄屏可横向滚动">
+<img src="/images/my-sglang/qwen35-gdn-profile.png" alt="由真实单步 decode trace 重绘的 CPU 发射和 GPU stream 时间线，融合后仍有投影和辅助计算，不能将图中跨度作为完整生成耗时。" loading="lazy" />
+</div>
+<figcaption>图 6：融合后的真实 CPU/GPU trace 重绘。同阶段 reference 为 2785 个 kernels，融合为 2185 个，其中 24 次为 recurrence kernel；30.399% 来自无 profiler 的三轮生成，不是由这张图的宽度计算。<a href="/images/my-sglang/qwen35-gdn-profile.png" target="_blank" rel="noopener">查看原图</a>。</figcaption>
+</figure>
+
+我们还在 Perfetto 中搜索 `_recurrent_kernel`，确认调用次数与 24 层 GDN 对应。这个检查让“代码里开了融合”变成“实际轨迹里执行了融合”。减少约 600 个 kernels 与替换范围相符，但剩余投影、Attention、norm 和状态操作继续占据开销。
+
+## 8. CPU 发射仍有成本，于是单独尝试 CUDA Graph
+
+融合改变 kernel 的计算粒度；CUDA Graph 改变重复提交方式。两者解决的问题不同，因此我们把 Graph 留作独立开关，用固定地址的 KV/GDN staging 捕获普通 decode，再把请求状态载入、replay 并提交回来。
+
+这一步先遇到了数值问题。动态 Attention 的有效长度与静态容量带 mask 的路径可能选择不同数值实现。诊断中 static 与 Graph 一致，而 eager 与 static 不一致，因此问题不应直接归咎于 capture。统一到 math SDPA 后，B=1、prefix=16、capacity=256 的三步 logits、hidden、KV、conv、recurrent 检查一致；更大 batch 和容量并没有全部通过。
+
+这组独立 Graph A/B 将 GDN 与 gated norm 都设为 reference，两侧均使用 math SDPA；它没有在上一节的 GDN 融合配置上累加收益。在这个有限范围内，包含 staging/replay/commit 的 forward wrapper 从 `16.176 ± 0.029 ms` 到 `10.807 ± 0.001 ms`。它排除了外部测试框架的 clone 和 token 选择，capture 另有成本，也不是完整 HTTP 生成。capacity=8192 的 logits 检查仍失败。
+
+我们还把 math SDPA 的额外成本单独测出来：Graph 关闭，512/128 生成交错 A/B 各三轮，math 比 auto 慢约 5.44%。因此当前默认仍是 auto，Graph 关闭；只暴露 B=1、capacity=256、math 的实验入口，没有宣布 8K 或 MTP Graph 已完成支持。
+
+这个实验说明扩展已有框架能力时，需要同时确认它改变的输入布局和数值路径。捕获成功本身不是验收终点。
+
+## 9. 最后才针对 5090 调参数：从 CTA 假设到负结果
+
+通用 GDN 融合稳定后，才开始用实际硬件信息做假设。B=1、H=32、value tile=32 时，launch grid 对应 `32×4=128` 个 CTA，而该 5090 实测有 170 个 SM。由此提出一个可测试的假设：缩小 value tile，增加 CTA 数，是否能提高小 batch 的并行利用？
+
+它不是保证。value tile 越小，Q/K normalization 和读取也可能重复更多次；tile 越大，又可能增加寄存器占用。因此我们独立扫描：
 
 ```text
-req.cached_len == 0       → 为新请求建立 state
-保存的 uid != req.uid    → 拒绝使用旧槽位状态
-state.length != cached_len → 报告模型与调度进度不一致
-req.extend_len           → 本轮 packed segment 的长度
+B       = 1, 4, 8
+T       = 1, 16, 128
+tile    = 16, 32, 64
+warps   = 4, 8
+总计    = 3 × 3 × 3 × 2 = 54 组
 ```
 
-`table_idx` 可以被复用，UID 才能区分新旧请求。请求结束或取消时，释放路径删除对应模型状态，同时处理 MTP session 等附属对象。若存在异步在途执行，归还槽位之前还必须建立 stream 依赖；仅从 Python 字典里删一个对象并不足以保证槽位安全。
+每组先与通用 tile32/warp4 对照输出和最终 state，通过后再测三轮。测量分成 Python wrapper 和 Graph 中连续调用的 GPU 间隔，后者用于减少主机发射空洞影响，**不是在宣称完整模型的 Graph 已通过**。
 
-Engine 为该模型选择 `TorchHybridBackend`，使用模型内部的 PyTorch SDPA 路径。它的 `kv_cache=None`；真实 KV 由模型动态 `torch.cat` 追加，调度层保留页表与页预算做容量管理。这是明确的首版实现边界：普通模型的物理 Paged KV 池并没有被直接用于这条混合模型路径。
+结果中九个输入形状有七个仍以通用 tile32/warp4 最低。仅 B1/T1 与 B8/T1 的 tile16/warp4 得到约 5.27%、5.79% 的局部 GPU 间隔下降。B1/T1 的 CTA 从 128 增至 256，GPU 间隔从约 2.436 到 2.308 μs，但 Python wrapper 均值却从约 13.371 增至 13.844 μs。
 
-当前接入路径要求 `page_size=1`、TP=1，并使用 naive prefix cache。一个可恢复的混合模型前缀必须同时包含 KV、卷积窗口与 GDN state，只恢复 KV 会改变后续结果。普通 decode Graph 也没有直接继承；后来加入的短上下文 Graph 是独立、默认关闭的实验入口。
+我们还看到 T>1 时 tile64/warp4 的寄存器数明显高于 tile32/warp4，增加 warp 通常更慢。没有据此添加默认 SM120 特化分派：完整模型按请求调用 GDN，不能直接套用 B8 微基准；局部改善也没有新的端到端证据。
 
-## 10. 第五步接入：把 MTP 模块变成可提交的推理流程
+成熟后端也纳入过比较。FlashInfer SM120 GDN 在九个测试形状上的最终 state 均未满足本项目预设容差，原因仍需进一步核对，不能直接认定为后端 bug。该轮及后续 fixed-linear 微基准还与外部 GPU 负载重叠，计时作废，仅保留数值和调用结构记录。这些都没有计入已验收优化。
 
-MTP 网络具备前向能力后，还要解决输入对齐、候选验证与状态恢复。`engine/speculative.py` 的 `GreedyMTPController` 管理这些计算，`scheduler/mtp.py` 的 `MTPBatchHandler` 将其接回在线调度与 token pool。
+## 10. 在线回归又把我们带回正确性问题
 
-### 10.1 Prefill 时先建立一位偏移的 MTP 历史
+把模型放进 HTTP、SSE 和真实批处理以后，我们固定 SPEED 的九条 coding/math/reasoning 请求，对普通与 MTP k=1 分别测并发 1/4/8、各三轮。这组在线对照使用 reference GDN 与 gated norm，关闭 Graph 和 overlap，调度策略为 `prefill_first`。两种模式各 81/81 请求完成；计数、EOS、SSE 拼接与每模式六次运行中取消有实际后端证据。
 
-对长度为 `n` 的 prompt，target 先产生各位置 hidden。MTP 用后移一位的 token 配对前一个位置的 hidden：
+但原始 token hash 只有 **55/81** 对齐。普通路径自身也出现跨 batch 差异。早期三个短聊天提示通过，不能覆盖真实到达顺序和更长输出；协议成功率也不能代替 greedy 一致性。
 
-```python
-mtp_input = input_ids[1:]
-previous_hidden = target.hidden_states[:-1]
-mtp_state = Qwen35State(position_offset=1)
-```
+下一步我们固定同一 teacher-forced token 历史，逐层比较 B=1/4/8 的激活，并在前后核对完整权重哈希。最早可见分歧出现在第 0 层 GDN 的 `in_proj_qkv`。关闭 BF16 reduced-precision reduction 后，prefill 的首个分歧移到 MLP down projection，并未消失。这个短诊断的 17 个预测位置仍然 argmax 相同，所以它只缩小排查范围，没有复现并解释所有在线分叉。
 
-这样主干消费了 `n` 个 token，MTP 消费了 `n−1` 对输入，MTP 的绝对位置从 1 开始。会话保存最后一个 target hidden，以及由 prompt 末尾 logits 选出的 `pending`。pending 已经输出，尚未由 target 消费。
+由此增加了默认关闭的固定归约 BF16 linear 路径（`89316b3`），并修正 rejection replay 后必须同步携带实际重放 hidden 与 bonus 的内部一致性问题（`49d8eeb`）。有限算子/CPU 检查有结果，修复后的完整 GPU 模型与在线回归仍待完成。
 
-分块 prefill 还存在跨块的配对：新块的第一个 token 需要上一块最后一个 target hidden。调度适配层保留 priming 状态，把这个边界补上，而不能对每块分别执行 `tokens[1:]` 后丢掉边界 token。
+这也是本文的当前终点：我们已经建立 Day 0 基线，接上混合状态与 MTP，并得到部分负载的局部和离线收益；完整 Qwen3.5/MTP 组合验收仍未结束。在线未对齐轮次中的吞吐变化没有被当成通过的加速成果。
 
-### 10.2 一个候选轮次做了哪些 forward
+## 11. 这条路线如何在 Git 和实验文件里复现
 
-假设已提交 target state 消费了 `c` 个 token，pending 为 `p`，本轮展开三个候选 `d1,d2,d3`：
+每次改动需要同时留下三个东西：能关闭的实现、可重复的比较输入，以及足以解释结论的结果。下面按本文步骤给出实际入口：
 
-1. **候选生成。** 克隆 MTP state，用 `(p, last_target_hidden)` 预测 d1，再用前一步 draft hidden 继续预测 d2、d3。原会话的状态保持原样。
-2. **目标验证。** 克隆 target state，一次消费 `[p,d1,d2,d3]`，取四个位置的目标 logits。第一个位置的预测与 d1 比较，依次找出连续匹配前缀。
-3. **恢复 target。** 若只接受 d1、d2，验证分支还消费了 d3，不能提交。当前实现从旧 target state 重放 `[p,d1,d2]`，得到长度为 `c+3` 的正确前缀状态。
-4. **恢复 MTP。** 从旧 MTP state 出发，以真实 target hidden 对 `[p,d1,d2]` 做 teacher forcing，得到对应的新 MTP KV。
-5. **发布。** 输出 `[d1,d2,bonus]`，其中 bonus 来自实际提交路径的最后一个 target logits。bonus 成为下一轮 pending。
-
-GDN 只有最后的 recurrent matrix，无法像一段 token 列表那样简单截去末尾。首版采用 clone 与重放，避免假定存在尚未实现的逆向状态恢复算子。它有额外开销，但提供了可检查的提交语义。
-
-MTP 的 free-running draft hidden 与 target hidden 不相同。因此，即使候选全部被接受，代码仍用 target hidden 推进待提交的 MTP 状态，没有直接把候选展开的 cache 作为最终状态。
-
-### 10.3 状态长度不变量与拒绝分支修复
-
-每轮完成后保持：
-
-```text
-mtp_state.length = target_state.length - 1
-pending          = 已输出、但 target 尚未消费的最后一个 token
-last_hidden      = target 已消费前缀的最后一个 hidden
-```
-
-一个 batch 中请求的接受长度可以不同。控制器先计算各请求的新状态和返回结果，完成检查及待发布 hidden 的分配，再更新 session 引用，避免处理到一半就提交部分请求。
-
-后续审查发现拒绝重放需要同步携带重放后的 hidden 和 bonus。`49d8eeb` 修复这条内部一致性路径，使下一轮使用实际提交状态对应的 hidden/logits。它解决的是一个具体状态关联问题，不能据此宣称早先的整个 greedy 回归已经恢复通过；修改后的完整 GPU 对照仍需另测。
-
-### 10.4 在线接口也要知道一轮可能输出多个 token
-
-调度适配层为候选验证预留位置，提交后释放只属于拒绝后缀的预留量，并更新 token pool 与请求长度。服务输出从单 token 扩展成 token 列表，EOS 与长度预算需要在列表内部截断。usage 累加实际 token 数，不能按 SSE 消息数计量。
-
-当前 MTP decode 直接调用 controller 的模型路径，绕过普通 `Engine.forward_batch` 与 Sampler。首版为固定步数 greedy；MTP 与 mixed/Graph 组合被拒绝，overlap 关闭。这些约束让模型接入的可运行范围明确，也标出了后续统一执行接口的工作。
-
-## 11. 我们如何验证，以及哪些问题仍然存在
-
-模型适配的验证需要逐层扩大范围。参数加载成功检查结构；单算子对齐检查局部数值；连续执行检查状态；真实在线回归才会暴露 batch 形状、请求到达与提交路径的组合问题。
-
-### 11.1 按证据强度阅读已有结果
-
-以下均为此前 5090 实验留存，本文写作期间没有重新执行 GPU 测试。结果路径相对 `docs/experiments/qwen35-sm120/results/`。
-
-| 阶段 | 实际证据 | 可以支持的判断 |
+| 阶段 | 代码 / 提交 | 主要证据 |
 | --- | --- | --- |
-| 通用算子 | `01-generic/gpu-tests.log`：30/30；`01-generic/gdn-hf-smoke.json`：8 组输出/state 最大误差 0 | 指定算子用例通过 |
-| 首次模型 smoke | `02-model/smoke/model.json`：441 键；32 输入、16 输出，3 轮相同；固定聊天前 16 token 与 HF 相同 | 该模型路径可加载、可连续生成，单个独立参考用例对齐 |
-| 真正跨块的输入 | `03-gated-norm/model-reference/model.json`：512 输入、128 输出、3 轮；64-token chunk 的前 16 输出与完整输入相同 | 该输入的 8 块续算与非分块前缀输出一致 |
-| 早期 MTP 小集 | `04-mtp/mtp.json`：B=1/3，普通/k=1/k=3，每配置 3 轮，共 18 条 batch-run，输出 32 token | 其中 12 条 MTP batch-run 与普通输出一致；使用强制长度生成 |
-| HTTP 与回收 | `07-http/`：普通/MTP 各 81/81 请求成功；各 6/6 运行中取消有后端释放记录 | 该轮协议、计数与回收用例通过 |
-| 在线严格 greedy | `07-http/mtp1/speed/comparison-vs-ordinary.json`：55/81 一致，26 条不同 | **完整普通/MTP 对齐未通过** |
+| 读结构、补配置 | `models/config.py`，`e8c60a6` | 配置回归，固定模型 revision |
+| 写通用算子 | `kernel/qwen35_reference.py`，`4f501ec` | `01-generic/gpu-tests.log`、`01-generic/gdn-hf-smoke.json` |
+| Day 0 与模型集成 | `models/qwen3_5.py`、注册/权重/Engine，`0e3bbf4` | `02-model/smoke/model.json` 与失败日志 |
+| 首项融合负结果 | `kernel/qwen35_fused.py` | `03-gated-norm/` |
+| MTP 早期检查 | `engine/speculative.py`、`scheduler/mtp.py` | `04-mtp/mtp.json` |
+| GDN 通用融合 | `kernel/qwen35_gdn.py`，`ce8acc4` | `05-gdn/`，23 项 GPU 检查、三轮模型对照 |
+| Graph 扩展 | `engine/qwen35_graph.py`、`b8da37d` 等集成 | `06-graph/`，通过与失败范围分别保留 |
+| SM120 参数比较 | `benchmarks/qwen35/tune_gdn.py`，`a2d3f20` | `07-sm120/sweep.json`，54 组全部结果 |
+| 在线与数值诊断 | HTTP benchmark、`batch_numerics.py`、`49d8eeb`、`89316b3` | `07-http/`、`09-batch-numerics/` |
 
-首轮 `32-token` smoke 中也记录了 `chunked_greedy_equal=true`，但脚本 chunk size 为 64，输入没有真正跨块。因此本文没有把它用作 chunk 边界正确性的证据；实际跨块检查采用后来 512-token 输入的记录。验收不仅要读 JSON 的布尔字段，还要检查测试参数是否触发了目标行为。
+早期测量曾在未全部提交的工作树中执行，因此结果中的 base HEAD 不总能单独重建全部代码。后续模型对照加入 `source_sha256`，复现时需要一起核对。本篇公开的 [A/B 摘录](/data/my-sglang/qwen35-stages.json)包含各轮样本、比较范围、来源文件哈希和源码哈希；完整原始文件继续保存在项目实验目录。
 
-早期 MTP 18 条记录使用固定输出长度、忽略 EOS。它适合检查执行过程，却不能代替真实在线结束行为或任务质量评估。HTTP 阶段另行检查了 EOS、usage、取消与资源回收；成功返回 HTTP 响应也不等于 token 序列已与普通基线一致。
-
-### 11.2 为什么单请求对齐仍不足够
-
-更大的在线子集中，普通模式自身也出现跨 batch 的 greedy 差异。这让问题不能仅靠“投机路径有没有漏输出”来判断。不同 batch 和验证长度会改变矩阵计算形状，可能触发不同浮点归约路径；微小 logits 差异在接近的候选之间可能改变 argmax，随后自回归轨迹继续分离。
-
-定位这类问题应固定同一 token 前缀，逐层比较 hidden/logits，而不是让两条已分叉的生成序列继续滚动比较。我们增加了 teacher-forced 数值诊断、不同 batch 形状对照，以及默认关闭的固定归约 BF16 linear 路径（`89316b3`）。这些是排查与实验入口；原始失败记录保留，后续受干扰的 GPU timing 没有纳入结论。
-
-因此当前可以说：文本主干、混合状态、packed forward 和原生 MTP 控制流程已经接入，部分算子、模型与服务用例有真实证据；**不能说全范围、全组合的 Qwen3.5/MTP 支持已完成验收，也不能把未对齐轮次中的吞吐变化列为已验收收益。**
-
-### 11.3 优化接在这个基线之后
-
-我们按通用算子、profile、融合、硬件配置比较的顺序推进。GDN recurrence 的可选融合在 `ce8acc4` 加入，SM120 tile/warp 独立比较由 `a2d3f20` 留存，Graph 和数值路径有各自开关与限制。
-
-模型接入阶段建立的显式 state、可切换算子与固定回归，使后续可以回答“哪部分变快、改变了什么数值路径、对端到端有多少贡献”。具体 profiler 时间线、融合方案与性能正负结果留到执行优化专题；这里不把参考模型实现与后续优化成果合并叙述。
-
-## 12. 从源码与实验记录复现这条接入路线
-
-按依赖关系阅读代码，可以把整条路径压缩成下面的索引：
-
-| 要核对的内容 | 主要入口 |
-| --- | --- |
-| 模型配置与 architecture 分派 | `models/config.py`、`models/register.py` |
-| checkpoint 映射与严格加载 | `models/weight.py`、`layers/base.py` |
-| Attention/GDN/MLP/MTP 网络 | `models/qwen3_5.py` |
-| 三个通用算子的数值顺序 | `kernel/qwen35_reference.py` |
-| 模型状态与 packed contract | `Qwen35State`、`Qwen3_5ForCausalLM.forward_packed` |
-| backend、容量与普通执行 | `attention/torch_hybrid.py`、`engine/engine.py` |
-| MTP 候选与提交 | `engine/speculative.py`、`scheduler/mtp.py` |
-| 结束、取消与回收 | `scheduler/scheduler.py`、`scheduler/cache.py`、`tokenizer/server.py` |
-
-Git 中几个关键节点如下，表示实际留存粒度：
-
-```text
-e8c60a6  配置：混合层、GDN 参数与 partial RoPE
-4f501ec  通用算子、测试与 profiler 微基准
-0e3bbf4  文本模型、原生 greedy MTP 与请求生命周期集成
-2b554b9  混合模型准入与投机资源释放修复
-49d8eeb  拒绝重放后的 target hidden/logits 一致性
-89316b3  可选固定归约 BF16 linear 与严格回归入口
-566bf69  留存审计及 trace 归档观察点
-```
-
-例如，`git show e8c60a6 -- python/minisgl/models/config.py` 可以查看第一步配置适配，`git show 4f501ec --stat` 可以查看通用算子阶段新增了哪些文件。运行实验时还要核对结果中的源码 SHA；早期实验曾在尚未全部提交的工作树中执行，只凭记录的 base HEAD 不能完整重建当时执行代码。
-
-现有模型基线脚本在 `benchmarks/qwen35/model_baseline.py`。在按已记录的软件版本准备的独立 CUDA venv 中，使用固定 revision 的本地模型快照，可以重新生成一组结果：
+例如，在按已记录版本准备的独立 CUDA venv 中，以模型普通路径重跑一组基线：
 
 ```bash
-# 位于 My_Sglang 仓库根目录；所有 Python 依赖均来自实验 venv。
+# 在 My_Sglang 仓库根目录；模型路径指向固定 revision 的本地快照。
 source /path/to/qwen35-venv/bin/activate
 export PYTHONPATH="$PWD/python"
 export MINISGL_QWEN35_GDN=reference
@@ -551,9 +451,9 @@ export MINISGL_QWEN35_GRAPH=0
 python benchmarks/qwen35/model_baseline.py \
   --model /path/to/pinned-Qwen3.5-4B-snapshot \
   --input-tokens 512 --output-tokens 128 --rounds 3 \
-  --check-hf --profile --output artifacts/qwen35-model-rerun
+  --check-hf --profile --output artifacts/qwen35-reference-rerun
 ```
 
-脚本对测量形状预热，分别记录 prefill、decode 与整体耗时，另做 64-token 分块检查；`--check-hf` 使用独立 HF 模型验证固定聊天用例，`--profile` 记录一轮 native decode。它不是完整验收套件，固定模型、开关、输入与干净 GPU 环境仍是比较前提；新结果应进入新目录。
+测试 GDN 时只将 `MINISGL_QWEN35_GDN` 切到 `triton`，输出到另一个新目录，其他条件保持相同。profile 用于解释结构，正式三轮计时在脚本的无 profiler 区间完成；不要用截图宽度换算加速，也不要覆盖上一轮失败数据。
 
-完整实验轨迹保存在仓库的 `docs/experiments/qwen35-sm120/实验记录.md`，权重及环境清单、原始 JSON、HTTP 阶段验收和数值分歧诊断与其同目录维护。本文沿这些记录说明模型接入的具体机制；后续工作的起点，是补齐尚未通过的组合回归，再在同一基线上评价性能改动。
+从这次接入中形成的工作顺序是：先让配置、权重和参考语义一致，再建立显式状态的普通路径；每增加一种执行模式，都检查它如何消费和提交状态；每提出一种优化，都用独立开关、数值回归和同负载对照决定是否保留。接下来仍需先解决真实 greedy 回归，再补齐混合调度、overlap 与更大输入范围的端到端验收。

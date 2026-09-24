@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="850" height="1440" viewBox="0 0 850 1440" role="img" aria-labelledby="title desc">
+<title id="title">先做通用融合，再独立比较 SM120 配置</title><desc id="desc">白板机制图。上半展示gated RMSNorm多个张量操作融合为单个Triton kernel，同时保留归一化后BF16舍入；下半展示GDN程序按请求、head和value列tile分工，每个程序保留完整128维key轴、按token时间顺序执行QK归一化与FP32状态递推。投影、卷积、g和beta准备、gated norm与输出投影仍在递推kernel外。最后区分通用tile32和4warps与后续SM120调参。不是kernel实测时间线或性能曲线。</desc>
+<style>text{font-family:"Comic Sans MS","Kaiti SC","STKaiti","KaiTi","PingFang SC",sans-serif;fill:#292929;font-size:20px}.small{font-size:18px}.title{font-size:25px}.label{font-size:22px}.tiny{font-size:16px}path,line{stroke-linecap:round;stroke-linejoin:round}</style><defs><marker id="arr" markerWidth="11" markerHeight="11" refX="9" refY="5" orient="auto"><path d="M1 1 L9 5 L1.5 9" fill="none" stroke="context-stroke" stroke-width="1.7"/></marker></defs>
+<path d="M0 0H850V1440H0Z" fill="white"/>
+<text x="28" y="37" class="title" style="fill:#292929" text-anchor="start">先减少中间读写，再看硬件配置是否值得改</text>
+<text x="28" y="73" class="label" style="fill:#1976d2" text-anchor="start">(a) 第一次融合：gated RMSNorm</text>
+<text x="28" y="108" class="small" style="fill:#707070" text-anchor="start">Reference：下图是张量操作依赖，不等于 5 个实际 kernel。</text>
+<path d="M42 130.5 Q93.0 128.7 144 129.9 Q159.1 130 158.2 144 L157.1 173 Q158 188.5 144 187.8 Q93.0 186.4 42 187.1 Q27 187 28.1 173 L28.9 144 Q27.2 129.2 42 129.7 Z" fill="white" stroke="#1976d2" stroke-width="1.8"/>
+<text x="93.0" y="166" class="small" style="fill:#1976d2" text-anchor="middle">RMS / FP32</text>
+<path d="M201 130.8 Q242.0 128.7 283 129.0 Q298.1 130 297.9 144 L296.7 173 Q297 188.5 283 185.9 Q242.0 186.4 201 187.6 Q186 187 186.9 173 L187.1 144 Q186.2 129.2 201 130.0 Z" fill="white" stroke="#e64b45" stroke-width="1.8"/>
+<text x="242.0" y="166" class="small" style="fill:#e64b45" text-anchor="middle">cast BF16</text>
+<path d="M340 129.2 Q398.5 128.7 457 131.0 Q472.1 130 471.2 144 L472.0 173 Q471 188.5 457 185.9 Q398.5 186.4 340 187.6 Q325 187 326.3 173 L326.2 144 Q325.2 129.2 340 129.3 Z" fill="white" stroke="#292929" stroke-width="1.8"/>
+<text x="398.5" y="166" class="small" style="fill:#292929" text-anchor="middle">× weight</text>
+<path d="M514 130.4 Q572.5 128.7 631 130.0 Q646.1 130 644.4 144 L644.5 173 Q645 188.5 631 186.1 Q572.5 186.4 514 187.0 Q499 187 501.0 173 L500.9 144 Q499.2 129.2 514 130.4 Z" fill="white" stroke="#292929" stroke-width="1.8"/>
+<text x="572.5" y="166" class="small" style="fill:#292929" text-anchor="middle">× SiLU(z)</text>
+<path d="M688 129.5 Q748.0 128.7 808 129.5 Q823.1 130 822.5 144 L821.5 173 Q822 188.5 808 187.6 Q748.0 186.4 688 186.2 Q673 187 673.6 173 L673.8 144 Q673.2 129.2 688 129.1 Z" fill="white" stroke="#1976d2" stroke-width="1.8"/>
+<text x="748.0" y="166" class="small" style="fill:#1976d2" text-anchor="middle">输出 BF16</text>
+<path d="M160 159 Q170.5 157 181 159" fill="none" stroke="#292929" stroke-width="1.8" marker-end="url(#arr)"/>
+<path d="M299 159 Q309.5 157 320 159" fill="none" stroke="#292929" stroke-width="1.8" marker-end="url(#arr)"/>
+<path d="M473 159 Q483.5 157 494 159" fill="none" stroke="#292929" stroke-width="1.8" marker-end="url(#arr)"/>
+<path d="M647 159 Q657.5 157 668 159" fill="none" stroke="#292929" stroke-width="1.8" marker-end="url(#arr)"/>
+<path d="M426 195 Q425 209 426 225" fill="none" stroke="#2a9d48" stroke-width="1.8" marker-end="url(#arr)"/>
+<path d="M42 236.5 Q425.0 235.7 808 237.0 Q823.1 237 821.9 251 L821.6 374 Q822 389.5 808 387.4 Q425.0 387.4 42 386.9 Q27 388 27.7 374 L29.0 251 Q27.2 236.2 42 236.7 Z" fill="white" stroke="#2a9d48" stroke-width="1.8" stroke-dasharray="7 6"/>
+<text x="48" y="270" class="" style="fill:#2a9d48" text-anchor="start">一个通用 Triton kernel · 每行对应一个 token / head</text>
+<text x="48" y="307" class="small" style="fill:#292929" text-anchor="start">FP32 RMS → BF16 舍入 → × FP32 weight → × FP32 SiLU(z)</text>
+<path d="M192 315 Q228 320 301 315" fill="none" stroke="#e64b45" stroke-width="1.8"/>
+<text x="48" y="342" class="small" style="fill:#e64b45" text-anchor="start">先转回输入 dtype 的边界仍在；最后 store 再转为 BF16。</text>
+<text x="48" y="372" class="small" style="fill:#707070" text-anchor="start">这是 4B 的 FP32 weight 路径；没有把 (1 + weight) 移植进来。</text>
+<text x="28" y="433" class="label" style="fill:#2a9d48" text-anchor="start">(b) 第二次融合：GDN 的 Q/K 归一化 + 状态递推</text>
+<text x="28" y="468" class="small" style="fill:#707070" text-anchor="start">融合边界必须画清楚：整层 GDN 仍有其它算子。</text>
+<path d="M42 490.9 Q146.5 488.7 251 489.9 Q266.1 490 264.6 504 L264.3 561 Q265 576.5 251 574.1 Q146.5 574.4 42 574.2 Q27 575 28.0 561 L29.0 504 Q27.2 489.2 42 491.0 Z" fill="white" stroke="#1976d2" stroke-width="1.8"/>
+<path d="M322 489.2 Q425.0 488.7 528 490.7 Q543.1 490 542.1 504 L542.9 561 Q542 576.5 528 575.0 Q425.0 574.4 322 575.5 Q307 575 307.7 561 L308.0 504 Q307.2 489.2 322 489.7 Z" fill="white" stroke="#2a9d48" stroke-width="1.8"/>
+<path d="M599 490.7 Q703.5 488.7 808 489.3 Q823.1 490 822.6 504 L822.1 561 Q822 576.5 808 576.0 Q703.5 574.4 599 575.2 Q584 575 584.3 561 L585.7 504 Q584.2 489.2 599 490.8 Z" fill="white" stroke="#1976d2" stroke-width="1.8"/>
+<text x="146" y="522" class="small" style="fill:#1976d2" text-anchor="middle">投影 / Conv + SiLU</text>
+<text x="146" y="552" class="small" style="fill:#1976d2" text-anchor="middle">g、β 准备</text>
+<text x="425" y="522" class="small" style="fill:#2a9d48" text-anchor="middle">Q/K norm + recurrence</text>
+<text x="425" y="552" class="small" style="fill:#2a9d48" text-anchor="middle">本次融合范围</text>
+<text x="704" y="522" class="small" style="fill:#1976d2" text-anchor="middle">gated norm</text>
+<text x="704" y="552" class="small" style="fill:#1976d2" text-anchor="middle">output projection</text>
+<path d="M271 532 Q285 530 302 532" fill="none" stroke="#292929" stroke-width="1.8" marker-end="url(#arr)"/>
+<path d="M548 532 Q562 530 579 532" fill="none" stroke="#292929" stroke-width="1.8" marker-end="url(#arr)"/>
+<path d="M425 582 Q424 601 425 618" fill="none" stroke="#2a9d48" stroke-width="1.8" marker-end="url(#arr)"/>
+<text x="28" y="647" class="" style="fill:#2a9d48" text-anchor="start">按 value 列切分；每个程序都保留完整的 K 轴</text>
+<text x="235" y="687" class="small" style="fill:#292929" text-anchor="middle">V = 128</text>
+<path d="M110 706.0 Q235.0 705.7 360 706.3 Q375.1 707 374.8 721 L373.7 901 Q374 916.5 360 915.1 Q235.0 914.4 110 913.9 Q95 915 96.9 901 L96.1 721 Q95.2 706.2 110 707.0 Z" fill="white" stroke="#2a9d48" stroke-width="1.8"/>
+<path d="M98 709 L164 708 L165 913 L98 912Z" fill="#e8f4e9"/>
+<path d="M165.5 710 Q166.5 810 165.5 912" fill="none" stroke="#2a9d48" stroke-width="1.5"/>
+<path d="M235.0 710 Q236.0 810 235.0 912" fill="none" stroke="#2a9d48" stroke-width="1.5"/>
+<path d="M304.5 710 Q305.5 810 304.5 912" fill="none" stroke="#2a9d48" stroke-width="1.5"/>
+<path d="M99 748.6 Q236 749.6 371 748.6" fill="none" stroke="#2a9d48" stroke-width="1"/>
+<path d="M99 790.2 Q236 791.2 371 790.2" fill="none" stroke="#2a9d48" stroke-width="1"/>
+<path d="M99 831.8 Q236 832.8 371 831.8" fill="none" stroke="#2a9d48" stroke-width="1"/>
+<path d="M99 873.4 Q236 874.4 371 873.4" fill="none" stroke="#2a9d48" stroke-width="1"/>
+<text x="49" y="788" class="" style="fill:#292929" text-anchor="middle">K</text>
+<text x="49" y="818" class="small" style="fill:#292929" text-anchor="middle">128</text>
+<text x="130" y="941" class="small" style="fill:#2a9d48" text-anchor="middle">tile 0</text>
+<text x="200" y="941" class="small" style="fill:#2a9d48" text-anchor="middle">tile 1</text>
+<text x="269" y="941" class="small" style="fill:#2a9d48" text-anchor="middle">tile 2</text>
+<text x="340" y="941" class="small" style="fill:#2a9d48" text-anchor="middle">tile 3</text>
+<text x="235" y="978" class="small" style="fill:#292929" text-anchor="middle">S: FP32 [128,128]</text>
+<text x="235" y="1009" class="small" style="fill:#2a9d48" text-anchor="middle">每块 [128,32] → 一个 CTA</text>
+<path d="M170 773 Q345 771 418 722" fill="none" stroke="#2a9d48" stroke-width="1.8" marker-end="url(#arr)" stroke-dasharray="6 6"/>
+<path d="M444 664.7 Q626.0 662.7 808 663.0 Q823.1 664 823.0 678 L820.9 1050 Q822 1065.5 808 1063.9 Q626.0 1063.4 444 1065.1 Q429 1064 429.4 1050 L430.0 678 Q429.2 663.2 444 663.9 Z" fill="white" stroke="#2a9d48" stroke-width="1.8" stroke-dasharray="7 6"/>
+<text x="447" y="697" class="small" style="fill:#2a9d48" text-anchor="start">固定 (request, head, value tile)</text>
+<text x="449" y="731" class="small" style="fill:#292929" text-anchor="start">① 读入旧 FP32 state tile</text>
+<path d="M622 741 Q621 753 622 766" fill="none" stroke="#292929" stroke-width="1.8" marker-end="url(#arr)"/>
+<path d="M466 774.8 Q626.0 773.7 786 774.9 Q801.1 775 800.1 789 L800.9 951 Q800 966.5 786 964.0 Q626.0 964.4 466 964.6 Q451 965 451.5 951 L452.8 789 Q451.2 774.2 466 774.1 Z" fill="white" stroke="#2a9d48" stroke-width="1.8"/>
+<text x="626" y="806" class="" style="fill:#2a9d48" text-anchor="middle">② for t = 0 … T−1</text>
+<text x="472" y="841" class="small" style="fill:#292929" text-anchor="start">Q/K norm：保留输入 dtype 舍入</text>
+<text x="472" y="873" class="small" style="fill:#292929" text-anchor="start">衰减 → memory → delta → 更新</text>
+<text x="472" y="905" class="small" style="fill:#292929" text-anchor="start">读取当前输出 y[t, value tile]</text>
+<text x="472" y="941" class="small" style="fill:#2a9d48" text-anchor="start">沿 token 顺序推进同一 state tile</text>
+<path d="M781 944 Q821 871 782 810" fill="none" stroke="#2a9d48" stroke-width="1.8" marker-end="url(#arr)"/>
+<path d="M622 975 Q621 987 622 999" fill="none" stroke="#292929" stroke-width="1.8" marker-end="url(#arr)"/>
+<text x="449" y="1030" class="small" style="fill:#292929" text-anchor="start">③ 写出独立的新 state tile</text>
+<text x="28" y="1102" class="small" style="fill:#292929" text-anchor="start">不同 value tile 可以并行；同一 tile 内沿时间串行递推。</text>
+<text x="28" y="1133" class="small" style="fill:#707070" text-anchor="start">grid = (B × H, 128 / VALUE_TILE)，输出状态不覆盖旧状态。</text>
+<text x="28" y="1181" class="label" style="fill:#ee8a16" text-anchor="start">这是两个实验阶段，不是一次“最优参数”改动</text>
+<path d="M42 1204.3 Q203.5 1203.7 365 1206.1 Q380.1 1205 379.6 1219 L379.6 1322 Q379 1337.5 365 1336.9 Q203.5 1335.4 42 1335.7 Q27 1336 27.1 1322 L27.7 1219 Q27.2 1204.2 42 1205.2 Z" fill="white" stroke="#2a9d48" stroke-width="1.8"/>
+<path d="M470 1204.0 Q639.0 1203.7 808 1205.0 Q823.1 1205 822.4 1219 L822.0 1322 Q822 1337.5 808 1335.3 Q639.0 1335.4 470 1337.1 Q455 1336 455.3 1322 L455.9 1219 Q455.2 1204.2 470 1203.9 Z" fill="white" stroke="#ee8a16" stroke-width="1.8"/>
+<text x="48" y="1239" class="" style="fill:#2a9d48" text-anchor="start">先：通用融合</text>
+<text x="48" y="1273" class="small" style="fill:#292929" text-anchor="start">VALUE_TILE = 32 / warps = 4</text>
+<text x="48" y="1307" class="small" style="fill:#292929" text-anchor="start">数值检查 → 微基准 → 模型对照</text>
+<path d="M386 1270 Q416 1267 448 1270" fill="none" stroke="#ee8a16" stroke-width="1.8" marker-end="url(#arr)"/>
+<text x="475" y="1239" class="" style="fill:#ee8a16" text-anchor="start">后：SM120 配置比较</text>
+<text x="475" y="1273" class="small" style="fill:#292929" text-anchor="start">tile = 16 / 32 / 64，warps = 4 / 8</text>
+<text x="475" y="1307" class="small" style="fill:#292929" text-anchor="start">逐项实测；收益不成立就不默认启用</text>
+<text x="28" y="1381" class="small" style="fill:#707070" text-anchor="start">通用阶段对应 ce8acc4；后续配置扫描对应 a2d3f20。</text>
+<text x="28" y="1416" class="small" style="fill:#707070" text-anchor="start">机制示意 · 非 kernel 实测时间线 / 数值曲线 · 箭头长度不表示耗时</text>
+</svg>

@@ -1,75 +1,159 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="850" height="840" viewBox="0 0 850 840" role="img" aria-labelledby="title desc">
-<title id="title">Qwen3.5 请求状态的连续推进与槽位复用</title><desc id="desc">同一请求依次消费第一段prefill、第二段prefill与一个已输出但未被模型消费的pending token。每轮使用现有KV、卷积和循环状态，并按消费token数增加length。主干position_offset为0，位置从当前length开始；模型核对uid和cached_len，在请求结束后释放状态，槽复用必须使用新uid并创建空状态。</desc>
-<style>text{font-family:Arial,"Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;fill:#29313a;font-size:16px}.title{font-size:21px;font-weight:600}.label{font-size:18px;font-weight:600}.small{font-size:15px;fill:#596574}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.box{fill:#fff;stroke:#73808d;stroke-width:1.3}.blue{fill:#eaf2f9;stroke:#2e608f;stroke-width:1.4}.orange{fill:#fff5e9;stroke:#b3793e;stroke-width:1.4}.panel{fill:#fff;stroke:#b3bdc6;stroke-width:1.2}.dash{fill:#fffaf5;stroke:#b3793e;stroke-width:1.4;stroke-dasharray:6 4}.arrow{fill:none;stroke:#5d6874;stroke-width:1.4;marker-end:url(#arrow)}.share{fill:none;stroke:#b3793e;stroke-width:1.4;stroke-dasharray:5 4;marker-end:url(#orangeArrow)}.line{fill:none;stroke:#5d6874;stroke-width:1.3}</style>
-<defs><marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#5d6874"/></marker><marker id="orangeArrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#b3793e"/></marker></defs>
-<rect width="850" height="840" fill="white"/>
-<text x="24" y="33" class="title">同一请求：消费区间、位置与状态连续性</text>
-<text x="24" y="62" class="small">普通文本路径：position_offset = 0；令 L = c + d。区间均为左闭右开。</text>
-<rect x="24" y="87" width="250" height="133" rx="0" class="blue"/>
-<text x="149" y="116" class="label" text-anchor="middle">Prefill · chunk 1</text>
-<text x="149" y="146" text-anchor="middle">输入 token [0, c)</text>
-<text x="149" y="174" class="mono small" text-anchor="middle">positions = [0, c)</text>
-<text x="149" y="201" class="small" text-anchor="middle">消费前 length = 0</text>
-<path d="M149 221 V264" class="arrow"/>
-<rect x="300" y="87" width="250" height="133" rx="0" class="blue"/>
-<text x="425" y="116" class="label" text-anchor="middle">Prefill · chunk 2</text>
-<text x="425" y="146" text-anchor="middle">输入 token [c, L)</text>
-<text x="425" y="174" class="mono small" text-anchor="middle">positions = [c, L)</text>
-<text x="425" y="201" class="small" text-anchor="middle">消费前 length = c</text>
-<path d="M425 221 V264" class="arrow"/>
-<rect x="576" y="87" width="250" height="133" rx="0" class="blue"/>
-<text x="701" y="116" class="label" text-anchor="middle">Decode · pending</text>
-<text x="701" y="146" text-anchor="middle">输入 token x[L]</text>
-<text x="701" y="174" class="mono small" text-anchor="middle">position = L</text>
-<text x="701" y="201" class="small" text-anchor="middle">消费前 length = L</text>
-<path d="M701 221 V264" class="arrow"/>
-<path d="M275 155 H293" class="arrow"/>
-<path d="M551 155 H569" class="arrow"/>
-<rect x="24" y="271" width="250" height="208" rx="0" class="box"/>
-<text x="149" y="300" class="label" text-anchor="middle">length = c</text>
-<path d="M37 314 H261" class="line"/>
-<text x="40" y="341" class="label">KV · 8 层</text>
-<text x="40" y="365" class="small">历史区间 [0, c)</text>
-<text x="40" y="396" class="label">conv · 24 层</text>
-<text x="40" y="419" class="small">最近 W 个卷积前输入</text>
-<text x="40" y="450">recurrent · 24 层 · FP32</text>
-<rect x="300" y="271" width="250" height="208" rx="0" class="box"/>
-<text x="425" y="300" class="label" text-anchor="middle">length = L</text>
-<path d="M313 314 H537" class="line"/>
-<text x="316" y="341" class="label">KV · 8 层</text>
-<text x="316" y="365" class="small">历史区间 [0, L)</text>
-<text x="316" y="396" class="label">conv · 24 层</text>
-<text x="316" y="419" class="small">最近 W 个卷积前输入</text>
-<text x="316" y="450">recurrent · 24 层 · FP32</text>
-<rect x="576" y="271" width="250" height="208" rx="0" class="box"/>
-<text x="701" y="300" class="label" text-anchor="middle">length = L + 1</text>
-<path d="M589 314 H813" class="line"/>
-<text x="592" y="341" class="label">KV · 8 层</text>
-<text x="592" y="365" class="small">历史区间 [0, L+1)</text>
-<text x="592" y="396" class="label">conv · 24 层</text>
-<text x="592" y="419" class="small">最近 W 个卷积前输入</text>
-<text x="592" y="450">recurrent · 24 层 · FP32</text>
-<path d="M275 383 H293" class="arrow"/>
-<path d="M551 383 H569" class="arrow"/>
-<rect x="24" y="501" width="802" height="79" rx="0" class="orange"/>
-<text x="42" y="530">pending 的边界：prefill 完成后输出 x[L]，状态仍只消费到 L。</text>
-<text x="42" y="557">下一轮 decode 消费 x[L] 后 length = L+1，再输出 x[L+1]；输出 ≠ 已入状态。</text>
-<text x="24" y="616" class="label">请求身份与回收：同一个 table_idx 可以复用，旧状态不能复用</text>
-<rect x="24" y="637" width="250" height="98" rx="0" class="blue"/>
-<text x="149" y="665" class="label" text-anchor="middle">运行前守卫</text>
-<text x="149" y="692" class="mono small" text-anchor="middle">stored_uid == req.uid</text>
-<text x="149" y="718" class="mono small" text-anchor="middle">state.length == cached_len</text>
-<path d="M275 686 H293" class="arrow"/>
-<rect x="300" y="637" width="250" height="98" rx="0" class="box"/>
-<text x="425" y="665" class="label" text-anchor="middle">结束 / 取消</text>
-<text x="425" y="692" text-anchor="middle">处理在途执行依赖</text>
-<text x="425" y="718" class="mono small" text-anchor="middle">release_request(slot, uid)</text>
-<path d="M551 686 H569" class="arrow"/>
-<rect x="576" y="637" width="250" height="98" rx="0" class="orange"/>
-<text x="701" y="665" class="label" text-anchor="middle">槽位交给新请求</text>
-<text x="701" y="692" text-anchor="middle">新 uid + cached_len = 0</text>
-<text x="701" y="718" text-anchor="middle">创建空状态，length = 0</text>
-<text x="24" y="768" class="mono small">状态归属：_request_states[table_idx] = (uid, Qwen35State)</text>
-<text x="24" y="796" class="small">蓝框：消费 / 活动状态；橙框：输出边界或身份变化；箭头表示逻辑推进，不是时间比例。</text>
-<text x="24" y="824" class="small">机制示意，非测量；此处为请求独立的动态 KV 路径，不表示已接入 Paged KV / Prefix Cache。</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="850" height="1220" viewBox="0 0 850 1220" role="img" aria-labelledby="title desc">
+<title id="title">从两块输入到一个 decode：状态如何接着走</title><desc id="desc">白板机制图。一个请求先消费位置0至3，再消费4至6，再消费此前已输出的token7。KV依次追加，四个卷积前投影窗口滚动，FP32循环矩阵继续递推。length为4、7、8。最后展示UID与长度守卫、等待在途工作后释放、新UID创建空状态。图形不代表实测值。</desc>
+<style>text{font-family:"Comic Sans MS","Kaiti SC","STKaiti","KaiTi","PingFang SC",sans-serif;fill:#292929;font-size:20px}.small{font-size:18px}.title{font-size:25px}.label{font-size:22px}.tiny{font-size:16px}path,line{stroke-linecap:round;stroke-linejoin:round}</style><defs><marker id="arr" markerWidth="11" markerHeight="11" refX="9" refY="5" orient="auto"><path d="M1 1 L9 5 L1.5 9" fill="none" stroke="context-stroke" stroke-width="1.7"/></marker></defs>
+<path d="M0 0H850V1220H0Z" fill="white"/>
+<text x="28" y="37" class="title" style="fill:#292929" text-anchor="start">分块以后，三个状态都要“接着上次算”</text>
+<text x="29" y="70" class="small" style="fill:#707070" text-anchor="start">普通文本路径 · 示例：4-token chunk + 3-token chunk + 1 decode</text>
+<path d="M42 101.1 Q140.0 99.7 238 101.6 Q253.1 101 252.5 115 L252.8 213 Q252 228.5 238 226.5 Q140.0 226.4 42 228.0 Q27 227 28.1 213 L28.5 115 Q27.2 100.2 42 101.6 Z" fill="white" stroke="#1976d2" stroke-width="1.8"/>
+<text x="140" y="132" class="" style="fill:#1976d2" text-anchor="middle">① Prefill / chunk 1</text>
+<path d="M77.66666666666667 150.9 Q81.5 148.7 85.33333333333333 149.5 Q98.1 150 96.7 161.66666666666666 L97.5 173.33333333333334 Q97.0 186.5 85.33333333333333 185.2 Q81.5 184.4 77.66666666666667 185.6 Q65.0 185 65.7 173.33333333333334 L67.0 161.66666666666666 Q65.2 149.2 77.66666666666667 148.9 Z" fill="white" stroke="#1976d2" stroke-width="1.8"/>
+<text x="81.5" y="173.5" class="small" style="fill:#1976d2" text-anchor="middle">0</text>
+<path d="M116.66666666666667 150.5 Q120.5 148.7 124.33333333333333 149.7 Q137.1 150 135.0 161.66666666666666 L136.4 173.33333333333334 Q136.0 186.5 124.33333333333333 184.0 Q120.5 184.4 116.66666666666667 184.4 Q104.0 185 104.6 173.33333333333334 L104.2 161.66666666666666 Q104.2 149.2 116.66666666666667 149.3 Z" fill="white" stroke="#1976d2" stroke-width="1.8"/>
+<text x="120.5" y="173.5" class="small" style="fill:#1976d2" text-anchor="middle">1</text>
+<path d="M155.66666666666666 149.1 Q159.5 148.7 163.33333333333334 150.8 Q176.1 150 174.1 161.66666666666666 L174.3 173.33333333333334 Q175.0 186.5 163.33333333333334 184.1 Q159.5 184.4 155.66666666666666 185.9 Q143.0 185 144.1 173.33333333333334 L144.7 161.66666666666666 Q143.2 149.2 155.66666666666666 151.0 Z" fill="white" stroke="#1976d2" stroke-width="1.8"/>
+<text x="159.5" y="173.5" class="small" style="fill:#1976d2" text-anchor="middle">2</text>
+<path d="M194.66666666666666 150.0 Q198.5 148.7 202.33333333333334 149.8 Q215.1 150 213.8 161.66666666666666 L213.5 173.33333333333334 Q214.0 186.5 202.33333333333334 185.2 Q198.5 184.4 194.66666666666666 186.0 Q182.0 185 183.0 173.33333333333334 L183.6 161.66666666666666 Q182.2 149.2 194.66666666666666 150.9 Z" fill="white" stroke="#1976d2" stroke-width="1.8"/>
+<text x="198.5" y="173.5" class="small" style="fill:#1976d2" text-anchor="middle">3</text>
+<text x="140" y="212" class="small" style="fill:#707070" text-anchor="middle">输入位置 [0,4)</text>
+<path d="M140 233 Q138 253 140 274" fill="none" stroke="#292929" stroke-width="1.8" marker-end="url(#arr)"/>
+<text x="140" y="304" class="label" style="fill:#292929" text-anchor="middle">length = 4</text>
+<path d="M327 101.7 Q425.0 99.7 523 101.4 Q538.1 101 537.1 115 L536.1 213 Q537 228.5 523 226.7 Q425.0 226.4 327 227.8 Q312 227 312.9 213 L313.4 115 Q312.2 100.2 327 100.5 Z" fill="white" stroke="#1976d2" stroke-width="1.8"/>
+<text x="425" y="132" class="" style="fill:#1976d2" text-anchor="middle">② Prefill / chunk 2</text>
+<path d="M382.1666666666667 150.2 Q386.0 148.7 389.8333333333333 149.4 Q402.6 150 402.1 161.66666666666666 L402.2 173.33333333333334 Q401.5 186.5 389.8333333333333 183.9 Q386.0 184.4 382.1666666666667 185.4 Q369.5 185 369.6 173.33333333333334 L371.5 161.66666666666666 Q369.7 149.2 382.1666666666667 149.3 Z" fill="white" stroke="#1976d2" stroke-width="1.8"/>
+<text x="386.0" y="173.5" class="small" style="fill:#1976d2" text-anchor="middle">4</text>
+<path d="M421.1666666666667 149.2 Q425.0 148.7 428.8333333333333 150.9 Q441.6 150 440.8 161.66666666666666 L439.4 173.33333333333334 Q440.5 186.5 428.8333333333333 184.9 Q425.0 184.4 421.1666666666667 185.7 Q408.5 185 408.8 173.33333333333334 L410.1 161.66666666666666 Q408.7 149.2 421.1666666666667 149.5 Z" fill="white" stroke="#1976d2" stroke-width="1.8"/>
+<text x="425.0" y="173.5" class="small" style="fill:#1976d2" text-anchor="middle">5</text>
+<path d="M460.1666666666667 149.9 Q464.0 148.7 467.8333333333333 149.8 Q480.6 150 478.5 161.66666666666666 L479.3 173.33333333333334 Q479.5 186.5 467.8333333333333 185.0 Q464.0 184.4 460.1666666666667 185.3 Q447.5 185 448.6 173.33333333333334 L447.8 161.66666666666666 Q447.7 149.2 460.1666666666667 150.2 Z" fill="white" stroke="#1976d2" stroke-width="1.8"/>
+<text x="464.0" y="173.5" class="small" style="fill:#1976d2" text-anchor="middle">6</text>
+<text x="425" y="212" class="small" style="fill:#707070" text-anchor="middle">输入位置 [4,7)</text>
+<path d="M425 233 Q423 253 425 274" fill="none" stroke="#292929" stroke-width="1.8" marker-end="url(#arr)"/>
+<text x="425" y="304" class="label" style="fill:#292929" text-anchor="middle">length = 7</text>
+<path d="M612 100.5 Q710.0 99.7 808 101.9 Q823.1 101 821.1 115 L822.6 213 Q822 228.5 808 226.1 Q710.0 226.4 612 227.1 Q597 227 597.7 213 L597.9 115 Q597.2 100.2 612 101.4 Z" fill="white" stroke="#1976d2" stroke-width="1.8"/>
+<text x="710" y="132" class="" style="fill:#1976d2" text-anchor="middle">③ Decode / pending</text>
+<path d="M706.1666666666666 150.7 Q710.0 148.7 713.8333333333334 148.9 Q726.6 150 726.3 161.66666666666666 L725.8 173.33333333333334 Q725.5 186.5 713.8333333333334 184.1 Q710.0 184.4 706.1666666666666 185.4 Q693.5 185 695.2 173.33333333333334 L694.2 161.66666666666666 Q693.7 149.2 706.1666666666666 150.8 Z" fill="white" stroke="#ee8a16" stroke-width="1.8"/>
+<text x="710.0" y="173.5" class="small" style="fill:#ee8a16" text-anchor="middle">7</text>
+<text x="710" y="212" class="small" style="fill:#707070" text-anchor="middle">输入位置 7</text>
+<path d="M710 233 Q708 253 710 274" fill="none" stroke="#292929" stroke-width="1.8" marker-end="url(#arr)"/>
+<text x="710" y="304" class="label" style="fill:#292929" text-anchor="middle">length = 8</text>
+<path d="M257 167 Q277 165 305 167" fill="none" stroke="#292929" stroke-width="1.8" marker-end="url(#arr)"/>
+<path d="M542 167 Q562 165 590 167" fill="none" stroke="#292929" stroke-width="1.8" marker-end="url(#arr)"/>
+<text x="28" y="357" class="label" style="fill:#1976d2" text-anchor="start">KV：保存过去，再追加当前块</text>
+<path d="M100.16666666666667 379.3 Q99.5 378.7 98.83333333333333 379.9 Q112.6 380 110.9 392.6666666666667 L112.2 405.3333333333333 Q111.5 419.5 98.83333333333333 417.6 Q99.5 417.4 100.16666666666667 417.4 Q86.5 418 88.6 405.3333333333333 L87.3 392.6666666666667 Q86.7 379.2 100.16666666666667 379.9 Z" fill="white" stroke="#1976d2" stroke-width="1.8"/>
+<text x="99.5" y="405.0" class="tiny" style="fill:#1976d2" text-anchor="middle">0</text>
+<path d="M127.16666666666667 380.4 Q126.5 378.7 125.83333333333333 379.3 Q139.6 380 139.2 392.6666666666667 L138.9 405.3333333333333 Q138.5 419.5 125.83333333333333 418.0 Q126.5 417.4 127.16666666666667 418.7 Q113.5 418 115.3 405.3333333333333 L113.6 392.6666666666667 Q113.7 379.2 127.16666666666667 381.0 Z" fill="white" stroke="#1976d2" stroke-width="1.8"/>
+<text x="126.5" y="405.0" class="tiny" style="fill:#1976d2" text-anchor="middle">1</text>
+<path d="M154.16666666666666 380.0 Q153.5 378.7 152.83333333333334 380.6 Q166.6 380 165.9 392.6666666666667 L166.5 405.3333333333333 Q165.5 419.5 152.83333333333334 418.6 Q153.5 417.4 154.16666666666666 417.4 Q140.5 418 140.7 405.3333333333333 L141.3 392.6666666666667 Q140.7 379.2 154.16666666666666 379.5 Z" fill="white" stroke="#1976d2" stroke-width="1.8"/>
+<text x="153.5" y="405.0" class="tiny" style="fill:#1976d2" text-anchor="middle">2</text>
+<path d="M181.16666666666666 379.4 Q180.5 378.7 179.83333333333334 380.1 Q193.6 380 192.5 392.6666666666667 L192.3 405.3333333333333 Q192.5 419.5 179.83333333333334 418.6 Q180.5 417.4 181.16666666666666 417.2 Q167.5 418 168.4 405.3333333333333 L168.4 392.6666666666667 Q167.7 379.2 181.16666666666666 380.2 Z" fill="white" stroke="#1976d2" stroke-width="1.8"/>
+<text x="180.5" y="405.0" class="tiny" style="fill:#1976d2" text-anchor="middle">3</text>
+<text x="140" y="453" class="small" style="fill:#1976d2" text-anchor="middle">4 个位置</text>
+<path d="M344.6666666666667 380.8 Q344.0 378.7 343.3333333333333 380.2 Q357.1 380 354.9 392.6666666666667 L356.2 405.3333333333333 Q356.0 419.5 343.3333333333333 417.7 Q344.0 417.4 344.6666666666667 417.8 Q331.0 418 332.2 405.3333333333333 L331.4 392.6666666666667 Q331.2 379.2 344.6666666666667 380.7 Z" fill="white" stroke="#1976d2" stroke-width="1.8"/>
+<text x="344.0" y="405.0" class="tiny" style="fill:#1976d2" text-anchor="middle">0</text>
+<path d="M371.6666666666667 379.7 Q371.0 378.7 370.3333333333333 379.7 Q384.1 380 383.1 392.6666666666667 L382.0 405.3333333333333 Q383.0 419.5 370.3333333333333 417.6 Q371.0 417.4 371.6666666666667 419.1 Q358.0 418 358.2 405.3333333333333 L358.8 392.6666666666667 Q358.2 379.2 371.6666666666667 380.6 Z" fill="white" stroke="#1976d2" stroke-width="1.8"/>
+<text x="371.0" y="405.0" class="tiny" style="fill:#1976d2" text-anchor="middle">1</text>
+<path d="M398.6666666666667 379.9 Q398.0 378.7 397.3333333333333 380.3 Q411.1 380 410.8 392.6666666666667 L410.8 405.3333333333333 Q410.0 419.5 397.3333333333333 417.8 Q398.0 417.4 398.6666666666667 417.7 Q385.0 418 384.9 405.3333333333333 L386.5 392.6666666666667 Q385.2 379.2 398.6666666666667 379.2 Z" fill="white" stroke="#1976d2" stroke-width="1.8"/>
+<text x="398.0" y="405.0" class="tiny" style="fill:#1976d2" text-anchor="middle">2</text>
+<path d="M425.6666666666667 379.9 Q425.0 378.7 424.3333333333333 379.2 Q438.1 380 437.5 392.6666666666667 L436.9 405.3333333333333 Q437.0 419.5 424.3333333333333 417.1 Q425.0 417.4 425.6666666666667 418.2 Q412.0 418 412.1 405.3333333333333 L412.7 392.6666666666667 Q412.2 379.2 425.6666666666667 379.5 Z" fill="white" stroke="#1976d2" stroke-width="1.8"/>
+<text x="425.0" y="405.0" class="tiny" style="fill:#1976d2" text-anchor="middle">3</text>
+<path d="M452.6666666666667 380.6 Q452.0 378.7 451.3333333333333 380.2 Q465.1 380 463.4 392.6666666666667 L463.6 405.3333333333333 Q464.0 419.5 451.3333333333333 417.9 Q452.0 417.4 452.6666666666667 418.7 Q439.0 418 439.7 405.3333333333333 L440.6 392.6666666666667 Q439.2 379.2 452.6666666666667 379.1 Z" fill="white" stroke="#2a9d48" stroke-width="1.8"/>
+<text x="452.0" y="405.0" class="tiny" style="fill:#2a9d48" text-anchor="middle">4</text>
+<path d="M479.6666666666667 379.2 Q479.0 378.7 478.3333333333333 380.6 Q492.1 380 490.7 392.6666666666667 L490.0 405.3333333333333 Q491.0 419.5 478.3333333333333 417.3 Q479.0 417.4 479.6666666666667 417.8 Q466.0 418 466.1 405.3333333333333 L466.7 392.6666666666667 Q466.2 379.2 479.6666666666667 381.1 Z" fill="white" stroke="#2a9d48" stroke-width="1.8"/>
+<text x="479.0" y="405.0" class="tiny" style="fill:#2a9d48" text-anchor="middle">5</text>
+<path d="M506.6666666666667 379.1 Q506.0 378.7 505.3333333333333 379.7 Q519.1 380 517.6 392.6666666666667 L517.2 405.3333333333333 Q518.0 419.5 505.3333333333333 419.0 Q506.0 417.4 506.6666666666667 417.5 Q493.0 418 493.3 405.3333333333333 L493.9 392.6666666666667 Q493.2 379.2 506.6666666666667 379.1 Z" fill="white" stroke="#2a9d48" stroke-width="1.8"/>
+<text x="506.0" y="405.0" class="tiny" style="fill:#2a9d48" text-anchor="middle">6</text>
+<text x="425" y="453" class="small" style="fill:#1976d2" text-anchor="middle">7 个位置</text>
+<path d="M616.1666666666666 379.9 Q615.5 378.7 614.8333333333334 379.3 Q628.6 380 627.5 392.6666666666667 L626.7 405.3333333333333 Q627.5 419.5 614.8333333333334 418.8 Q615.5 417.4 616.1666666666666 418.0 Q602.5 418 603.8 405.3333333333333 L602.9 392.6666666666667 Q602.7 379.2 616.1666666666666 379.0 Z" fill="white" stroke="#1976d2" stroke-width="1.8"/>
+<text x="615.5" y="405.0" class="tiny" style="fill:#1976d2" text-anchor="middle">0</text>
+<path d="M643.1666666666666 379.4 Q642.5 378.7 641.8333333333334 380.0 Q655.6 380 653.4 392.6666666666667 L653.8 405.3333333333333 Q654.5 419.5 641.8333333333334 418.9 Q642.5 417.4 643.1666666666666 417.5 Q629.5 418 629.8 405.3333333333333 L631.2 392.6666666666667 Q629.7 379.2 643.1666666666666 379.5 Z" fill="white" stroke="#1976d2" stroke-width="1.8"/>
+<text x="642.5" y="405.0" class="tiny" style="fill:#1976d2" text-anchor="middle">1</text>
+<path d="M670.1666666666666 380.1 Q669.5 378.7 668.8333333333334 380.1 Q682.6 380 681.5 392.6666666666667 L680.5 405.3333333333333 Q681.5 419.5 668.8333333333334 418.4 Q669.5 417.4 670.1666666666666 417.6 Q656.5 418 658.3 405.3333333333333 L658.5 392.6666666666667 Q656.7 379.2 670.1666666666666 379.7 Z" fill="white" stroke="#1976d2" stroke-width="1.8"/>
+<text x="669.5" y="405.0" class="tiny" style="fill:#1976d2" text-anchor="middle">2</text>
+<path d="M697.1666666666666 380.8 Q696.5 378.7 695.8333333333334 381.0 Q709.6 380 707.8 392.6666666666667 L708.0 405.3333333333333 Q708.5 419.5 695.8333333333334 418.9 Q696.5 417.4 697.1666666666666 418.8 Q683.5 418 683.9 405.3333333333333 L683.9 392.6666666666667 Q683.7 379.2 697.1666666666666 380.8 Z" fill="white" stroke="#1976d2" stroke-width="1.8"/>
+<text x="696.5" y="405.0" class="tiny" style="fill:#1976d2" text-anchor="middle">3</text>
+<path d="M724.1666666666666 379.1 Q723.5 378.7 722.8333333333334 379.3 Q736.6 380 734.8 392.6666666666667 L735.0 405.3333333333333 Q735.5 419.5 722.8333333333334 417.9 Q723.5 417.4 724.1666666666666 417.2 Q710.5 418 710.8 405.3333333333333 L712.6 392.6666666666667 Q710.7 379.2 724.1666666666666 379.9 Z" fill="white" stroke="#2a9d48" stroke-width="1.8"/>
+<text x="723.5" y="405.0" class="tiny" style="fill:#2a9d48" text-anchor="middle">4</text>
+<path d="M751.1666666666666 379.9 Q750.5 378.7 749.8333333333334 379.5 Q763.6 380 763.6 392.6666666666667 L762.7 405.3333333333333 Q762.5 419.5 749.8333333333334 418.0 Q750.5 417.4 751.1666666666666 417.2 Q737.5 418 739.0 405.3333333333333 L738.1 392.6666666666667 Q737.7 379.2 751.1666666666666 380.9 Z" fill="white" stroke="#2a9d48" stroke-width="1.8"/>
+<text x="750.5" y="405.0" class="tiny" style="fill:#2a9d48" text-anchor="middle">5</text>
+<path d="M778.1666666666666 379.2 Q777.5 378.7 776.8333333333334 380.2 Q790.6 380 790.1 392.6666666666667 L789.8 405.3333333333333 Q789.5 419.5 776.8333333333334 419.0 Q777.5 417.4 778.1666666666666 419.1 Q764.5 418 765.9 405.3333333333333 L764.6 392.6666666666667 Q764.7 379.2 778.1666666666666 380.9 Z" fill="white" stroke="#2a9d48" stroke-width="1.8"/>
+<text x="777.5" y="405.0" class="tiny" style="fill:#2a9d48" text-anchor="middle">6</text>
+<path d="M805.1666666666666 380.0 Q804.5 378.7 803.8333333333334 379.7 Q817.6 380 816.1 392.6666666666667 L815.4 405.3333333333333 Q816.5 419.5 803.8333333333334 417.3 Q804.5 417.4 805.1666666666666 417.3 Q791.5 418 791.9 405.3333333333333 L793.1 392.6666666666667 Q791.7 379.2 805.1666666666666 379.2 Z" fill="white" stroke="#ee8a16" stroke-width="1.8"/>
+<text x="804.5" y="405.0" class="tiny" style="fill:#ee8a16" text-anchor="middle">7</text>
+<text x="710" y="453" class="small" style="fill:#1976d2" text-anchor="middle">8 个位置</text>
+<path d="M254 406 Q278 405 306 406" fill="none" stroke="#1976d2" stroke-width="1.8" marker-end="url(#arr)"/>
+<path d="M539 406 Q563 405 591 406" fill="none" stroke="#1976d2" stroke-width="1.8" marker-end="url(#arr)"/>
+<text x="28" y="505" class="label" style="fill:#ee8a16" text-anchor="start">Conv：只保留最近 4 个“卷积前投影”</text>
+<path d="M70.66666666666667 533.5 Q76.0 532.7 81.33333333333333 534.2 Q95.1 534 93.2 546.6666666666666 L94.6 559.3333333333334 Q94 573.5 81.33333333333333 570.9 Q76.0 571.4 70.66666666666667 571.9 Q57 572 57.3 559.3333333333334 L57.0 546.6666666666666 Q57.2 533.2 70.66666666666667 534.3 Z" fill="white" stroke="#ee8a16" stroke-width="1.8"/>
+<text x="76.0" y="559.0" class="small" style="fill:#ee8a16" text-anchor="middle">u0</text>
+<path d="M112.66666666666667 534.1 Q118.0 532.7 123.33333333333333 534.0 Q137.1 534 135.6 546.6666666666666 L135.7 559.3333333333334 Q136 573.5 123.33333333333333 571.1 Q118.0 571.4 112.66666666666667 571.0 Q99 572 100.0 559.3333333333334 L100.4 546.6666666666666 Q99.2 533.2 112.66666666666667 533.5 Z" fill="white" stroke="#ee8a16" stroke-width="1.8"/>
+<text x="118.0" y="559.0" class="small" style="fill:#ee8a16" text-anchor="middle">u1</text>
+<path d="M154.66666666666666 534.0 Q160.0 532.7 165.33333333333334 534.0 Q179.1 534 177.8 546.6666666666666 L177.4 559.3333333333334 Q178 573.5 165.33333333333334 572.1 Q160.0 571.4 154.66666666666666 571.7 Q141 572 141.9 559.3333333333334 L142.6 546.6666666666666 Q141.2 533.2 154.66666666666666 534.2 Z" fill="white" stroke="#ee8a16" stroke-width="1.8"/>
+<text x="160.0" y="559.0" class="small" style="fill:#ee8a16" text-anchor="middle">u2</text>
+<path d="M196.66666666666666 534.6 Q202.0 532.7 207.33333333333334 534.6 Q221.1 534 220.2 546.6666666666666 L219.3 559.3333333333334 Q220 573.5 207.33333333333334 572.8 Q202.0 571.4 196.66666666666666 572.0 Q183 572 184.7 559.3333333333334 L183.1 546.6666666666666 Q183.2 533.2 196.66666666666666 534.3 Z" fill="white" stroke="#ee8a16" stroke-width="1.8"/>
+<text x="202.0" y="559.0" class="small" style="fill:#ee8a16" text-anchor="middle">u3</text>
+<text x="140" y="610" class="small" style="fill:#ee8a16" text-anchor="middle">旧窗口 → u0…u3</text>
+<path d="M355.6666666666667 534.2 Q361.0 532.7 366.3333333333333 534.8 Q380.1 534 379.5 546.6666666666666 L379.7 559.3333333333334 Q379 573.5 366.3333333333333 572.1 Q361.0 571.4 355.6666666666667 572.9 Q342 572 343.4 559.3333333333334 L342.3 546.6666666666666 Q342.2 533.2 355.6666666666667 535.0 Z" fill="white" stroke="#ee8a16" stroke-width="1.8"/>
+<text x="361.0" y="559.0" class="small" style="fill:#ee8a16" text-anchor="middle">u3</text>
+<path d="M397.6666666666667 533.5 Q403.0 532.7 408.3333333333333 533.4 Q422.1 534 420.6 546.6666666666666 L421.7 559.3333333333334 Q421 573.5 408.3333333333333 572.2 Q403.0 571.4 397.6666666666667 572.1 Q384 572 384.5 559.3333333333334 L385.1 546.6666666666666 Q384.2 533.2 397.6666666666667 534.7 Z" fill="white" stroke="#ee8a16" stroke-width="1.8"/>
+<text x="403.0" y="559.0" class="small" style="fill:#ee8a16" text-anchor="middle">u4</text>
+<path d="M439.6666666666667 534.4 Q445.0 532.7 450.3333333333333 533.9 Q464.1 534 463.6 546.6666666666666 L462.5 559.3333333333334 Q463 573.5 450.3333333333333 571.1 Q445.0 571.4 439.6666666666667 572.6 Q426 572 426.1 559.3333333333334 L425.9 546.6666666666666 Q426.2 533.2 439.6666666666667 534.7 Z" fill="white" stroke="#ee8a16" stroke-width="1.8"/>
+<text x="445.0" y="559.0" class="small" style="fill:#ee8a16" text-anchor="middle">u5</text>
+<path d="M481.6666666666667 534.0 Q487.0 532.7 492.3333333333333 533.0 Q506.1 534 504.6 546.6666666666666 L504.3 559.3333333333334 Q505 573.5 492.3333333333333 572.1 Q487.0 571.4 481.6666666666667 571.8 Q468 572 469.8 559.3333333333334 L467.9 546.6666666666666 Q468.2 533.2 481.6666666666667 534.1 Z" fill="white" stroke="#ee8a16" stroke-width="1.8"/>
+<text x="487.0" y="559.0" class="small" style="fill:#ee8a16" text-anchor="middle">u6</text>
+<text x="425" y="610" class="small" style="fill:#ee8a16" text-anchor="middle">滑走 u0…u2</text>
+<path d="M640.6666666666666 534.4 Q646.0 532.7 651.3333333333334 533.2 Q665.1 534 664.7 546.6666666666666 L664.9 559.3333333333334 Q664 573.5 651.3333333333334 572.2 Q646.0 571.4 640.6666666666666 572.5 Q627 572 628.8 559.3333333333334 L629.1 546.6666666666666 Q627.2 533.2 640.6666666666666 533.8 Z" fill="white" stroke="#ee8a16" stroke-width="1.8"/>
+<text x="646.0" y="559.0" class="small" style="fill:#ee8a16" text-anchor="middle">u4</text>
+<path d="M682.6666666666666 533.5 Q688.0 532.7 693.3333333333334 533.2 Q707.1 534 705.7 546.6666666666666 L706.5 559.3333333333334 Q706 573.5 693.3333333333334 573.0 Q688.0 571.4 682.6666666666666 572.2 Q669 572 670.2 559.3333333333334 L670.4 546.6666666666666 Q669.2 533.2 682.6666666666666 533.0 Z" fill="white" stroke="#ee8a16" stroke-width="1.8"/>
+<text x="688.0" y="559.0" class="small" style="fill:#ee8a16" text-anchor="middle">u5</text>
+<path d="M724.6666666666666 533.0 Q730.0 532.7 735.3333333333334 532.9 Q749.1 534 748.7 546.6666666666666 L748.7 559.3333333333334 Q748 573.5 735.3333333333334 571.3 Q730.0 571.4 724.6666666666666 572.8 Q711 572 711.3 559.3333333333334 L711.8 546.6666666666666 Q711.2 533.2 724.6666666666666 533.9 Z" fill="white" stroke="#ee8a16" stroke-width="1.8"/>
+<text x="730.0" y="559.0" class="small" style="fill:#ee8a16" text-anchor="middle">u6</text>
+<path d="M766.6666666666666 535.1 Q772.0 532.7 777.3333333333334 534.1 Q791.1 534 788.9 546.6666666666666 L791.0 559.3333333333334 Q790 573.5 777.3333333333334 572.8 Q772.0 571.4 766.6666666666666 573.0 Q753 572 755.1 559.3333333333334 L753.0 546.6666666666666 Q753.2 533.2 766.6666666666666 533.2 Z" fill="white" stroke="#ee8a16" stroke-width="1.8"/>
+<text x="772.0" y="559.0" class="small" style="fill:#ee8a16" text-anchor="middle">u7</text>
+<text x="710" y="610" class="small" style="fill:#ee8a16" text-anchor="middle">滑走 u3</text>
+<path d="M254 555 Q277 553 306 555" fill="none" stroke="#ee8a16" stroke-width="1.8" marker-end="url(#arr)"/>
+<path d="M539 555 Q562 553 591 555" fill="none" stroke="#ee8a16" stroke-width="1.8" marker-end="url(#arr)"/>
+<text x="28" y="662" class="label" style="fill:#2a9d48" text-anchor="start">GDN：固定形状的 FP32 记忆持续更新</text>
+<path d="M83 688.3 Q140.0 687.7 197 689.0 Q212.1 689 210.4 703 L210.2 773 Q211 788.5 197 787.2 Q140.0 786.4 83 787.9 Q68 787 68.8 773 L68.5 703 Q68.2 688.2 83 689.8 Z" fill="white" stroke="#2a9d48" stroke-width="1.8"/>
+<path d="M104.5 692 Q105.5 734 104.5 784" fill="none" stroke="#2a9d48" stroke-width="1"/>
+<path d="M140.0 692 Q141.0 734 140.0 784" fill="none" stroke="#2a9d48" stroke-width="1"/>
+<path d="M175.5 692 Q176.5 734 175.5 784" fill="none" stroke="#2a9d48" stroke-width="1"/>
+<path d="M72 721.7 Q134 722.7 208 721.7" fill="none" stroke="#2a9d48" stroke-width="1"/>
+<path d="M72 754.4 Q134 755.4 208 754.4" fill="none" stroke="#2a9d48" stroke-width="1"/>
+<text x="140" y="823" class="label" style="fill:#2a9d48" text-anchor="middle">S₄</text>
+<path d="M368 689.4 Q425.0 687.7 482 689.1 Q497.1 689 495.1 703 L496.4 773 Q496 788.5 482 786.0 Q425.0 786.4 368 787.3 Q353 787 354.7 773 L354.7 703 Q353.2 688.2 368 689.5 Z" fill="white" stroke="#2a9d48" stroke-width="1.8"/>
+<path d="M389.5 692 Q390.5 734 389.5 784" fill="none" stroke="#2a9d48" stroke-width="1"/>
+<path d="M425.0 692 Q426.0 734 425.0 784" fill="none" stroke="#2a9d48" stroke-width="1"/>
+<path d="M460.5 692 Q461.5 734 460.5 784" fill="none" stroke="#2a9d48" stroke-width="1"/>
+<path d="M357 721.7 Q419 722.7 493 721.7" fill="none" stroke="#2a9d48" stroke-width="1"/>
+<path d="M357 754.4 Q419 755.4 493 754.4" fill="none" stroke="#2a9d48" stroke-width="1"/>
+<text x="425" y="823" class="label" style="fill:#2a9d48" text-anchor="middle">S₇</text>
+<path d="M653 687.9 Q710.0 687.7 767 689.5 Q782.1 689 780.6 703 L780.1 773 Q781 788.5 767 787.3 Q710.0 786.4 653 787.1 Q638 787 639.6 773 L639.5 703 Q638.2 688.2 653 687.9 Z" fill="white" stroke="#2a9d48" stroke-width="1.8"/>
+<path d="M674.5 692 Q675.5 734 674.5 784" fill="none" stroke="#2a9d48" stroke-width="1"/>
+<path d="M710.0 692 Q711.0 734 710.0 784" fill="none" stroke="#2a9d48" stroke-width="1"/>
+<path d="M745.5 692 Q746.5 734 745.5 784" fill="none" stroke="#2a9d48" stroke-width="1"/>
+<path d="M642 721.7 Q704 722.7 778 721.7" fill="none" stroke="#2a9d48" stroke-width="1"/>
+<path d="M642 754.4 Q704 755.4 778 754.4" fill="none" stroke="#2a9d48" stroke-width="1"/>
+<text x="710" y="823" class="label" style="fill:#2a9d48" text-anchor="middle">S₈</text>
+<path d="M223 735 Q270 731 341 735" fill="none" stroke="#2a9d48" stroke-width="1.8" marker-end="url(#arr)"/>
+<path d="M508 735 Q555 731 626 735" fill="none" stroke="#2a9d48" stroke-width="1.8" marker-end="url(#arr)"/>
+<text x="28" y="854" class="small" style="fill:#707070" text-anchor="start">KV 图示每层历史；卷积 / 矩阵图示每个 GDN 层。</text>
+<text x="28" y="883" class="small" style="fill:#707070" text-anchor="start">实际：8 层 KV；24 层 Conv + GDN。矩阵内格子不表示数值。</text>
+<path d="M42 909.1 Q425.0 907.7 808 908.3 Q823.1 909 821.7 923 L821.1 984 Q822 999.5 808 997.5 Q425.0 997.4 42 997.9 Q27 998 28.1 984 L29.1 923 Q27.2 908.2 42 908.2 Z" fill="white" stroke="#ee8a16" stroke-width="1.8" stroke-dasharray="7 6"/>
+<text x="48" y="941" class="small" style="fill:#ee8a16" text-anchor="start">输出 ≠ 已消费：第二块算完后选出并输出 token 7，length 仍为 7。</text>
+<text x="48" y="976" class="small" style="fill:#292929" text-anchor="start">第三步才消费 token 7；length 变成 8，并从新 logits 选出 token 8。</text>
+<text x="28" y="1038" class="label" style="fill:#e64b45" text-anchor="start">换请求时，槽位可复用，旧记忆不能跟过去</text>
+<path d="M42 1059.9 Q152.0 1058.7 262 1059.2 Q277.1 1060 276.5 1074 L276.2 1146 Q276 1161.5 262 1160.4 Q152.0 1159.4 42 1160.4 Q27 1160 28.1 1146 L28.4 1074 Q27.2 1059.2 42 1060.1 Z" fill="white" stroke="#1976d2" stroke-width="1.8"/>
+<path d="M318 1059.6 Q423.0 1058.7 528 1059.8 Q543.1 1060 542.0 1074 L541.9 1146 Q542 1161.5 528 1159.3 Q423.0 1159.4 318 1159.9 Q303 1160 303.3 1146 L303.8 1074 Q303.2 1059.2 318 1060.5 Z" fill="white" stroke="#292929" stroke-width="1.8"/>
+<path d="M584 1059.1 Q696.0 1058.7 808 1059.9 Q823.1 1060 822.9 1074 L820.9 1146 Q822 1161.5 808 1160.5 Q696.0 1159.4 584 1160.5 Q569 1160 569.1 1146 L569.2 1074 Q569.2 1059.2 584 1061.1 Z" fill="white" stroke="#2a9d48" stroke-width="1.8"/>
+<text x="152" y="1092" class="" style="fill:#1976d2" text-anchor="middle">运行前核对</text>
+<text x="152" y="1120" class="small" style="fill:#292929" text-anchor="middle">uid 相同</text>
+<text x="152" y="1147" class="small" style="fill:#292929" text-anchor="middle">length == cached_len</text>
+<text x="423" y="1092" class="" style="fill:#292929" text-anchor="middle">结束 / 取消</text>
+<text x="423" y="1120" class="small" style="fill:#292929" text-anchor="middle">等待在途执行依赖</text>
+<text x="423" y="1147" class="small" style="fill:#292929" text-anchor="middle">按 slot + uid 释放</text>
+<text x="696" y="1092" class="" style="fill:#2a9d48" text-anchor="middle">新请求</text>
+<text x="696" y="1120" class="small" style="fill:#292929" text-anchor="middle">新 uid + 空状态</text>
+<text x="696" y="1147" class="small" style="fill:#292929" text-anchor="middle">cached_len = 0</text>
+<path d="M281 1110 Q289 1108 298 1110" fill="none" stroke="#292929" stroke-width="1.8" marker-end="url(#arr)"/>
+<path d="M546 1110 Q555 1108 564 1110" fill="none" stroke="#292929" stroke-width="1.8" marker-end="url(#arr)"/>
+<text x="28" y="1198" class="small" style="fill:#707070" text-anchor="start">机制示意 · 非测量时间线 · 此路径是动态 KV，不表示 Paged / Prefix Cache</text>
 </svg>
