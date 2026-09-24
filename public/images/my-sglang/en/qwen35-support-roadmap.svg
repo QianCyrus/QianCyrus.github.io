@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="850" height="1074" viewBox="0 0 850 1074" role="img" aria-labelledby="title desc">
+<title id="title">Qwen3.5 integration: build a verifiable baseline, then optimize</title><desc id="desc">Configuration, weights, and reference code guide portable GPU operators, followed by the article-defined Day 0 milestone: minimal ordinary greedy inference without MTP. Request state, packed execution, and native MTP come next. Then iterate through profiling, one change at a time, regression checks, and comparisons. Day 0 does not mean model release day. This is a dependency roadmap, not a measured timeline.</desc>
+<style>text{font-family:"Comic Sans MS","Chalkboard","Bradley Hand","Kaiti SC","STKaiti","KaiTi","PingFang SC","Microsoft YaHei",sans-serif;font-size:18px;fill:#242424}.title{font-size:24px;font-weight:600}.label{font-size:21px}.small{font-size:16px;fill:#626262}.mono{font-family:"Comic Sans MS","Chalkboard","PingFang SC",sans-serif}.blue{fill:#1976d2}.green{fill:#2a9d48}.orange{fill:#c2760a}.red{fill:#cf514b}path{stroke-linecap:round;stroke-linejoin:round}</style>
+<defs><pattern id="hatchGreen" patternUnits="userSpaceOnUse" width="11" height="11" patternTransform="rotate(35)"><path d="M0 0 V11" stroke="#acd8b8" stroke-width="1.2" /></pattern><pattern id="hatchBlue" patternUnits="userSpaceOnUse" width="11" height="11" patternTransform="rotate(35)"><path d="M0 0 V11" stroke="#abd3ed" stroke-width="1.2" /></pattern></defs>
+<rect width="850" height="1074" fill="white" />
+<text x="30" y="38" class="title">Build a verifiable path, then optimize one step at a time</text>
+<text x="30" y="68" class="small">Qwen3.5 integration · evidence → code → measurement</text>
+<path d="M55 101 C112.69999999999999 98.3 194.84 101.9 239 100.3 Q257.9 99 258 118 C256.2 153.36 258.2 181.2 256.7 198 Q258 216.8 239 216.5 C188.17999999999998 214.9 103.82 217.5 53 215.9 Q33.6 216.3 35.2 198 C36.4 178.88 34 145.24 35.1 118 Q34 100.8 55 101 Z" fill="white" stroke="#1976d2" stroke-width="1.9" />
+<text x="146" y="132" class="label blue" text-anchor="middle">config</text>
+<text x="146" y="167" text-anchor="middle">Layer types / dimensions</text>
+<text x="146" y="195" text-anchor="middle">Positions / tied head</text>
+<path d="M334 101 C391.7 98.3 473.84000000000003 101.9 518 100.3 Q536.9 99 537 118 C535.2 153.36 537.2 181.2 535.7 198 Q537 216.8 518 216.5 C467.17999999999995 214.9 382.82 217.5 332 215.9 Q312.6 216.3 314.2 198 C315.4 178.88 313 145.24 314.1 118 Q313 100.8 334 101 Z" fill="white" stroke="#ee8a16" stroke-width="1.9" />
+<text x="425" y="132" class="label orange" text-anchor="middle">weights</text>
+<text x="425" y="167" text-anchor="middle">Keys / shapes / dtypes</text>
+<text x="425" y="195" text-anchor="middle">Backbone / extensions</text>
+<path d="M612 101 C669.7 98.3 751.84 101.9 796 100.3 Q814.9 99 815 118 C813.2 153.36 815.2 181.2 813.7 198 Q815 216.8 796 216.5 C745.18 214.9 660.8199999999999 217.5 610 215.9 Q590.6 216.3 592.2 198 C593.4 178.88 591 145.24 592.1 118 Q591 100.8 612 101 Z" fill="white" stroke="#2a9d48" stroke-width="1.9" />
+<text x="703" y="132" class="label green" text-anchor="middle">reference</text>
+<text x="703" y="167" text-anchor="middle">Layer math / rounding</text>
+<text x="703" y="195" text-anchor="middle">State inputs / outputs</text>
+<path d="M147 219 C150 247 184 261 224 282" fill="none" stroke="#242424" stroke-width="1.85" />
+<path d="M218 270 L224 282 L229 269" fill="none" stroke="#242424" stroke-width="1.75" />
+<path d="M425 219 C423 240 426 263 425 284" fill="none" stroke="#242424" stroke-width="1.85" />
+<path d="M419 272 L425 284 L430 271" fill="none" stroke="#242424" stroke-width="1.75" />
+<path d="M703 219 C700 247 665 262 626 282" fill="none" stroke="#242424" stroke-width="1.85" />
+<path d="M620 270 L626 282 L631 269" fill="none" stroke="#242424" stroke-width="1.75" />
+<path d="M166 292 C341.29999999999995 289.3 547.76 292.9 686 291.3 Q704.9 290 705 309 C703.2 341.14 705.2 367.3 703.7 382 Q705 400.8 686 400.5 C531.02 398.9 318.98 401.5 164 399.9 Q144.6 400.3 146.2 382 C147.4 365.12 145 333.51 146.1 309 Q145 291.8 166 292 Z" fill="white" stroke="#2a9d48" stroke-width="1.9" />
+<text x="425" y="323" class="label green" text-anchor="middle">Portable GPU operators</text>
+<text x="425" y="355" text-anchor="middle">Attention · Conv · GDN · Norm</text>
+<text x="425" y="384" class="small" text-anchor="middle">Match equations, numerics, and state before fusion</text>
+<path d="M425 403 C427 417 423 433 425 449" fill="none" stroke="#242424" stroke-width="1.85" />
+<path d="M419 437 L425 449 L430 436" fill="none" stroke="#242424" stroke-width="1.75" />
+<path d="M111 458 C324.1 455.3 570.52 458.9 739 457.3 Q757.9 456 758 475 C756.2 508.52 758.2 535.4 756.7 551 Q758 569.8 739 569.5 C550.54 567.9 297.46000000000004 570.5 109 568.9 Q89.6 569.3 91.2 551 C92.4 533.16 90 500.68 91.1 475 Q90 457.8 111 458 Z" fill="white" stroke="#1976d2" stroke-width="1.9" />
+<text x="425" y="489" class="label blue" text-anchor="middle">Day 0 · ordinary greedy, without MTP</text>
+<text x="158" y="537" class="label" text-anchor="middle">load</text>
+<text x="320" y="537" class="label" text-anchor="middle">prefill</text>
+<text x="492" y="537" class="label" text-anchor="middle">decode</text>
+<text x="679" y="537" class="label" text-anchor="middle">HF smoke</text>
+<path d="M199 530 Q235.0 528 271 531" fill="none" stroke="#242424" stroke-width="1.85" />
+<path d="M259 526 L271 531 L258 537" fill="none" stroke="#242424" stroke-width="1.75" />
+<path d="M363 530 Q405.0 528 447 531" fill="none" stroke="#242424" stroke-width="1.85" />
+<path d="M435 526 L447 531 L434 537" fill="none" stroke="#242424" stroke-width="1.75" />
+<path d="M537 530 Q574.0 528 611 531" fill="none" stroke="#242424" stroke-width="1.85" />
+<path d="M599 526 L611 531 L598 537" fill="none" stroke="#242424" stroke-width="1.75" />
+<path d="M425 571 C423 589 426 609 425 629" fill="none" stroke="#242424" stroke-width="1.85" />
+<path d="M419 617 L425 629 L430 616" fill="none" stroke="#242424" stroke-width="1.75" />
+<path d="M191 639 C348.79999999999995 636.3 536.76 639.9 661 638.3 Q679.9 637 680 656 C678.2 691.82 680.2 719.9 678.7 737 Q680 755.8 661 755.5 C521.52 753.9 328.48 756.5 189 754.9 Q169.6 755.3 171.2 737 C172.4 717.56 170 683.63 171.1 656 Q170 638.8 191 639 Z" fill="white" stroke="#242424" stroke-width="1.9" />
+<text x="425" y="670" class="label" text-anchor="middle">After Day 0: runtime and MTP</text>
+<text x="425" y="706" text-anchor="middle">Request state → packed execution → native MTP</text>
+<text x="425" y="736" class="small" text-anchor="middle">Connect lifecycle, batch boundaries, and commit semantics</text>
+<path d="M425 758 C426 782 168 773 148 801 Q144 808 144 823" fill="none" stroke="#242424" stroke-width="1.85" />
+<path d="M138 811 L144 823 L149 810" fill="none" stroke="#242424" stroke-width="1.75" />
+<text x="572" y="792" class="small red" text-anchor="middle">Iterate one change at a time</text>
+<path d="M55 832 C110.6 829.3 190.51999999999998 832.9 233 831.3 Q251.9 830 252 849 C250.2 875.62 252.2 898.9 250.7 910 Q252 928.8 233 928.5 C184.04 926.9 101.96 929.5 53 927.9 Q33.6 928.3 35.2 910 C36.4 896.96 34 868.83 35.1 849 Q34 831.8 55 832 Z" fill="white" stroke="#1976d2" stroke-width="1.9" />
+<text x="143.0" y="866" class="label blue" text-anchor="middle">profile</text>
+<text x="143.0" y="903" text-anchor="middle"><tspan x="143.0" y="895">Find hotspots</tspan><tspan x="143.0" y="919">/ overhead</tspan></text>
+<path d="M335 832 C392.0 829.3 473.4 832.9 517 831.3 Q535.9 830 536 849 C534.2 875.62 536.2 898.9 534.7 910 Q536 928.8 517 928.5 C466.79999999999995 926.9 383.2 929.5 333 927.9 Q313.6 928.3 315.2 910 C316.4 896.96 314 868.83 315.1 849 Q314 831.8 335 832 Z" fill="white" stroke="#ee8a16" stroke-width="1.9" />
+<text x="425.0" y="866" class="label orange" text-anchor="middle">One change</text>
+<text x="425.0" y="903" text-anchor="middle"><tspan x="425.0" y="895">Change one factor</tspan><tspan x="425.0" y="919">at a time</tspan></text>
+<path d="M616 832 C672.3 829.3 752.96 832.9 796 831.3 Q814.9 830 815 849 C813.2 875.62 815.2 898.9 813.7 910 Q815 928.8 796 928.5 C746.42 926.9 663.58 929.5 614 927.9 Q594.6 928.3 596.2 910 C597.4 896.96 595 868.83 596.1 849 Q595 831.8 616 832 Z" fill="white" stroke="#2a9d48" stroke-width="1.9" />
+<text x="705.0" y="866" class="label green" text-anchor="middle">Regression + A/B</text>
+<text x="705.0" y="903" text-anchor="middle"><tspan x="705.0" y="895">Correctness / cost</tspan><tspan x="705.0" y="919">/ benefit</tspan></text>
+<path d="M253 875 C269 873 289 878 309 875" fill="none" stroke="#242424" stroke-width="1.85" />
+<path d="M297 870 L309 875 L296 881" fill="none" stroke="#242424" stroke-width="1.75" />
+<path d="M537 875 C553 877 573 873 590 875" fill="none" stroke="#242424" stroke-width="1.85" />
+<path d="M578 870 L590 875 L577 881" fill="none" stroke="#242424" stroke-width="1.75" />
+<path d="M706 931 C708 949 705 962 681 966 C506 971 302 964 170 968 Q141 969 143 935" fill="none" stroke="#e64b45" stroke-width="1.85" />
+<path d="M137 947 L143 935 L148 948" fill="none" stroke="#e64b45" stroke-width="1.75" />
+<text x="425" y="994" class="small red" text-anchor="middle">Keep failures and results with no gains; revisit hotspots and hypotheses</text>
+<text x="30" y="1029" class="small">Day 0 is a baseline milestone defined here, not a claim of model-release-day support.</text>
+<text x="30" y="1050" class="small">Solid arrows: dependencies. Red loop: experiments. A mechanism sketch, not a measured timeline.</text>
+</svg>

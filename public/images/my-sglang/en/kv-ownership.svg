@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="850" height="634" viewBox="0 0 850 634" role="img" aria-labelledby="title desc"><title id="title">KV cache: indexing, ownership, and physical storage</title><desc id="desc">Two requests share the first two tokens. Page-table row A maps to slots 6, 1, 7, 2; row B maps to 6, 1, 5, 0. The host Radix tree tracks references; GPU page tables store physical token-slot addresses. Completion unlocks the prefix. Its physical slots become free only when an evictable leaf is reclaimed. This example uses page_size = 1.</desc>
+<style>text{font-family:Arial,"Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;fill:#29313a;font-size:16px} .title{font-size:20px;font-weight:600}.label{font-size:17px;font-weight:600}.small{font-size:14px;fill:#596574}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.line{fill:none;stroke:#5d6874;stroke-width:1.3}.arrow{fill:none;stroke:#5d6874;stroke-width:1.3;marker-end:url(#arrow)}.blue{fill:#eaf2f9;stroke:#2e608f;stroke-width:1.4}.box{fill:white;stroke:#73808d;stroke-width:1.2}.dash{fill:#fffaf5;stroke:#b3793e;stroke-width:1.4;stroke-dasharray:5 3}</style><defs><marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#5d6874" /></marker><pattern id="hatch" patternUnits="userSpaceOnUse" width="7" height="7"><path d="M0 7L7 0" stroke="#d9bc9d" stroke-width="1" /></pattern></defs>
+<rect width="850" height="634" fill="white" />
+<text x="24" y="31" class="title">KV cache: logical indexing and physical ownership</text>
+<text x="24" y="62" class="label">(a) Radix prefix index</text>
+<text x="391" y="62" class="label">(b) Request rows and physical slots</text>
+<text x="24" y="86" class="small">Host tree / token keys; GPU index values</text>
+<text x="391" y="86" class="small">page_table and token_pool live on the GPU</text>
+<rect x="111" y="104" width="117" height="35" class="box" />
+<text x="169" y="128" class="mono" text-anchor="middle">root</text>
+<path d="M146 140 V160 H105 V179" class="arrow" />
+<path d="M194 140 V160 H288 V179" class="arrow" />
+<rect x="27" y="185" width="170" height="81" class="blue" />
+<text x="112" y="211" class="mono" text-anchor="middle">[p₀, p₁]</text>
+<text x="112" y="235" class="mono small" text-anchor="middle">value = [6, 1]</text>
+<text x="112" y="256" class="small" text-anchor="middle">ref_count = 2</text>
+<rect x="225" y="185" width="126" height="81" class="dash" />
+<text x="288" y="211" class="mono" text-anchor="middle">[r₀]</text>
+<text x="288" y="235" class="mono small" text-anchor="middle">value = [4]</text>
+<text x="288" y="256" class="small" text-anchor="middle">ref_count = 0</text>
+<text x="27" y="290" class="small">Active references from A and B pin the prefix</text>
+<text x="27" y="312" class="small">Only unreferenced leaves may be evicted</text>
+<text x="398" y="160" class="label">Req A</text>
+<rect x="463" y="134" width="73" height="45" class="blue" />
+<text x="499.5" y="163" class="mono" text-anchor="middle">6</text>
+<rect x="546" y="134" width="73" height="45" class="blue" />
+<text x="582.5" y="163" class="mono" text-anchor="middle">1</text>
+<rect x="629" y="134" width="73" height="45" class="box" />
+<text x="665.5" y="163" class="mono" text-anchor="middle">7</text>
+<rect x="712" y="134" width="73" height="45" class="box" />
+<text x="748.5" y="163" class="mono" text-anchor="middle">2</text>
+<text x="398" y="236" class="label">Req B</text>
+<rect x="463" y="210" width="73" height="45" class="blue" />
+<text x="499.5" y="239" class="mono" text-anchor="middle">6</text>
+<rect x="546" y="210" width="73" height="45" class="blue" />
+<text x="582.5" y="239" class="mono" text-anchor="middle">1</text>
+<rect x="629" y="210" width="73" height="45" class="box" />
+<text x="665.5" y="239" class="mono" text-anchor="middle">5</text>
+<rect x="712" y="210" width="73" height="45" class="box" />
+<text x="748.5" y="239" class="mono" text-anchor="middle">0</text>
+<text x="499" y="119" class="small" text-anchor="middle">pos 0</text>
+<text x="582" y="119" class="small" text-anchor="middle">pos 1</text>
+<text x="665" y="119" class="small" text-anchor="middle">pos 2</text>
+<text x="748" y="119" class="small" text-anchor="middle">pos 3</text>
+<text x="463" y="195" class="small">A private tail: 7 → 2</text>
+<text x="620" y="278" class="small">B private tail: 5 → 0</text>
+
+<path d="M499 256 V307 H676 V439" class="arrow" />
+<path d="M582 256 V328 H171 V439" class="arrow" />
+<text x="426" y="359" class="small" text-anchor="middle">Multiple request rows reference the same physical slots</text>
+<text x="423" y="391" class="label" text-anchor="middle">(c) Per-layer K / V storage · noncontiguous addresses</text>
+<rect x="24" y="443" width="92" height="56" class="box" />
+<text x="70" y="461" class="small mono" text-anchor="middle">slot 0</text>
+<text x="70" y="486" text-anchor="middle">B tail</text>
+<rect x="125" y="443" width="92" height="56" class="blue" />
+<text x="171" y="461" class="small mono" text-anchor="middle">slot 1</text>
+<text x="171" y="486" text-anchor="middle">p₁</text>
+<rect x="226" y="443" width="92" height="56" class="box" />
+<text x="272" y="461" class="small mono" text-anchor="middle">slot 2</text>
+<text x="272" y="486" text-anchor="middle">A tail</text>
+<rect x="327" y="443" width="92" height="56" class="box" />
+<text x="373" y="461" class="small mono" text-anchor="middle">slot 3</text>
+<text x="373" y="486" text-anchor="middle">free</text>
+<rect x="428" y="443" width="92" height="56" class="dash" />
+<text x="474" y="461" class="small mono" text-anchor="middle">slot 4</text>
+<text x="474" y="486" text-anchor="middle">r₀</text>
+<rect x="529" y="443" width="92" height="56" class="box" />
+<text x="575" y="461" class="small mono" text-anchor="middle">slot 5</text>
+<text x="575" y="486" text-anchor="middle">B tail</text>
+<rect x="630" y="443" width="92" height="56" class="blue" />
+<text x="676" y="461" class="small mono" text-anchor="middle">slot 6</text>
+<text x="676" y="486" text-anchor="middle">p₀</text>
+<rect x="731" y="443" width="92" height="56" class="box" />
+<text x="777" y="461" class="small mono" text-anchor="middle">slot 7</text>
+<text x="777" y="486" text-anchor="middle">A tail</text>
+<path d="M333 523 H367" class="arrow" />
+<text x="24" y="528" class="small">Request done → unlock(handle)</text>
+<text x="382" y="528" class="small">ref_count = 0 → evictable</text>
+<path d="M579 523 H608" class="arrow" />
+<text x="620" y="528" class="small">evict → free slots</text>
+<rect x="24" y="552" width="18" height="16" class="blue" />
+<text x="51" y="566" class="small">Blue, solid: active references</text>
+<rect x="277" y="552" width="18" height="16" class="dash" />
+<text x="315" y="566" class="small">Dashed: evictable cache</text>
+<text x="550" y="566" class="small">Free request row ≠ free all KV</text>
+<text x="24" y="592" class="small">Example: page_size = 1; allocation remains page-based. Layers share the address mapping.</text>
+<text x="24" y="616" class="small">K and V data are stored separately.</text></svg>
