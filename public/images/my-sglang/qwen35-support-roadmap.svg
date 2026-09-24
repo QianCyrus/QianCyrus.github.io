@@ -12,7 +12,7 @@
 <path d="M334 101 C391.7 98.3 473.84000000000003 101.9 518 100.3 Q536.9 99 537 118 C535.2 153.36 537.2 181.2 535.7 198 Q537 216.8 518 216.5 C467.17999999999995 214.9 382.82 217.5 332 215.9 Q312.6 216.3 314.2 198 C315.4 178.88 313 145.24 314.1 118 Q313 100.8 334 101 Z" fill="white" stroke="#ee8a16" stroke-width="1.9"/>
 <text x="425" y="132" class="label orange" text-anchor="middle">weights</text>
 <text x="425" y="167" text-anchor="middle">键名 / shape / dtype</text>
-<text x="425" y="195" text-anchor="middle">文本与 MTP 的范围</text>
+<text x="425" y="195" text-anchor="middle">主干参数 / 后续扩展项</text>
 <path d="M612 101 C669.7 98.3 751.84 101.9 796 100.3 Q814.9 99 815 118 C813.2 153.36 815.2 181.2 813.7 198 Q815 216.8 796 216.5 C745.18 214.9 660.8199999999999 217.5 610 215.9 Q590.6 216.3 592.2 198 C593.4 178.88 591 145.24 592.1 118 Q591 100.8 612 101 Z" fill="white" stroke="#2a9d48" stroke-width="1.9"/>
 <text x="703" y="132" class="label green" text-anchor="middle">reference</text>
 <text x="703" y="167" text-anchor="middle">逐层公式与舍入</text>
@@ -30,7 +30,7 @@
 <path d="M425 403 C427 417 423 433 425 449" fill="none" stroke="#242424" stroke-width="1.85"/>
 <path d="M419 437 L425 449 L430 436" fill="none" stroke="#242424" stroke-width="1.75"/>
 <path d="M111 458 C324.1 455.3 570.52 458.9 739 457.3 Q757.9 456 758 475 C756.2 508.52 758.2 535.4 756.7 551 Q758 569.8 739 569.5 C550.54 567.9 297.46000000000004 570.5 109 568.9 Q89.6 569.3 91.2 551 C92.4 533.16 90 500.68 91.1 475 Q90 457.8 111 458 Z" fill="white" stroke="#1976d2" stroke-width="1.9"/>
-<text x="425" y="489" class="label blue" text-anchor="middle">Day 0 · 最小 greedy 路径</text>
+<text x="425" y="489" class="label blue" text-anchor="middle">Day 0 · 普通 greedy，不含 MTP</text>
 <text x="158" y="537" class="label" text-anchor="middle">load</text>
 <text x="320" y="537" class="label" text-anchor="middle">prefill</text>
 <text x="492" y="537" class="label" text-anchor="middle">decode</text>
@@ -44,7 +44,7 @@
 <path d="M425 571 C423 589 426 609 425 629" fill="none" stroke="#242424" stroke-width="1.85"/>
 <path d="M419 617 L425 629 L430 616" fill="none" stroke="#242424" stroke-width="1.75"/>
 <path d="M191 639 C348.79999999999995 636.3 536.76 639.9 661 638.3 Q679.9 637 680 656 C678.2 691.82 680.2 719.9 678.7 737 Q680 755.8 661 755.5 C521.52 753.9 328.48 756.5 189 754.9 Q169.6 755.3 171.2 737 C172.4 717.56 170 683.63 171.1 656 Q170 638.8 191 639 Z" fill="white" stroke="#242424" stroke-width="1.9"/>
-<text x="425" y="670" class="label" text-anchor="middle">接入 runtime</text>
+<text x="425" y="670" class="label" text-anchor="middle">Day 0 后：runtime 与 MTP 扩展</text>
 <text x="425" y="706" text-anchor="middle">请求状态  →  packed 执行  →  原生 MTP</text>
 <text x="425" y="736" class="small" text-anchor="middle">把生命周期、批次边界与提交语义接完整</text>
 <path d="M425 758 C426 782 168 773 148 801 Q144 808 144 823" fill="none" stroke="#242424" stroke-width="1.85"/>

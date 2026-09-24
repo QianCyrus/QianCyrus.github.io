@@ -12,7 +12,7 @@ draft: true
 
 这篇文章复盘我们如何把 **Qwen3.5-4B 的文本路径接入 My_Sglang**。讲解顺序沿着实现依赖推进：先确定差异，写出通用计算，跑通最小生成闭环，再让框架管理请求，最后从测量结果决定下一项优化。模型结构会在影响实现决策时展开。
 
-文中的 **Day 0** 指「最小原生离线推理闭环」：真实权重能够严格加载，prefill/decode 能连续执行，固定用例与独立参考对齐。它是本文给一个里程碑取的名字，不表示发布当天完成适配，也不代表全部功能已经验收。实际 Git 中，模型与 Engine、调度、MTP 的初版曾一起提交；下面按依赖拆开讲，保留真实提交和测量粒度。
+文中的 **Day 0** 仅指「普通文本推理的最小原生离线闭环」：主干权重能够严格加载，普通 prefill/decode 能连续执行，固定 greedy 用例与独立参考对齐。**MTP 不属于 Day 0 的功能或验收条件**；候选生成、目标验证和状态提交是普通推理基线建立后的独立扩展。Day 0 是本文给一个里程碑取的名字，不表示发布当天完成适配，也不代表全部功能已经验收。实际 Git 中，模型与 Engine、调度、MTP 的初版曾一起提交；提交被合在一起，不等于这些能力属于同一验收阶段。
 
 <figure class="sg-static-figure">
 <div class="sg-static-scroll" tabindex="0" role="region" aria-label="从模型审计到 Day 0 与逐项优化的接入路线，窄屏可横向滚动">
@@ -171,21 +171,20 @@ x_next = u + down_proj(silu(gate_proj(post_norm(u))) * up_proj(post_norm(u)))
 
 首次加载确实失败了：checkpoint 中 `A_log` 与 `linear_attn.norm.weight` 为 FP32，而最初参数声明随默认 dtype 成了 BF16。修复是显式声明这两类参数为 FP32，并让 Engine 按各参数的预期 dtype 加载；没有把所有参数统一降为 BF16。
 
-### 3.2 用 441 个键做结构自检
+### 3.2 先核对普通推理所需的 426 个主干键
 
-文本与 MTP 权重最终严格加载了 441 个键，可以从网络结构反推：
+Day 0 要核对的是普通文本主干，可以从网络结构反推需要的 426 个键：
 
 | 部分 | 键数推导 |
 | --- | ---: |
 | 24 个 GDN decoder | 24 × 14 = 336 |
 | 8 个 Attention decoder | 8 × 11 = 88 |
 | 文本 embedding 与 final norm | 2 |
-| 单层 MTP：FC、两个输入 norm、decoder、final norm | 15 |
-| 合计 | **441** |
+| 普通文本主干合计 | **426** |
 
 GDN 的 14 个键包含四个输入投影、conv、A_log、dt_bias、gated norm、out projection，再加两处 decoder norm 和三个 FFN 投影。Attention 层的 11 个键则由 q/k/v/o、Q/K norm、两处 decoder norm 和三个 FFN 投影组成。tied embedding 不额外创建 LM head 权重。
 
-441 只是结构交叉检查，完整性仍取决于每个键的名称、shape、dtype；这里也只覆盖声明支持的文本与 MTP 范围。
+键数只是结构交叉检查，完整性仍取决于每个键的名称、shape、dtype。实际集成实现启动时还一并加载了 15 个 MTP 参数，因此历史日志中的总数是 441；这是加载器的实现粒度，不将 MTP 的执行与正确性计入 Day 0。新增的 15 个键及其执行流程放到第 4.4 节说明。
 
 ### 3.3 先用一段最小循环隔离模型问题
 
@@ -209,7 +208,7 @@ for step in range(output_tokens):
 
 ### 3.4 什么证据允许我们跨过这个里程碑
 
-首轮 `02-model/smoke/model.json` 保存了：真实 441 键加载、32-token 输入/16-token 输出的三轮重复一致，以及一个固定聊天用例的前 16 个 greedy token 与独立 HF 模型一致。到这里，我们把它称为 Day 0 最小闭环通过，继续扩展框架接口。
+首轮 `02-model/smoke/model.json` 保存了：真实 441 键加载（426 个主干键及一并加载的 15 个 MTP 键）、32-token 输入/16-token 输出的三轮普通生成重复一致，以及一个固定聊天用例的前 16 个 greedy token 与独立 HF 模型一致。这组普通生成不执行 MTP 候选、验证或提交。到这里，我们把它称为 Day 0 最小闭环通过，继续扩展框架接口。
 
 这里有一条后来的审计勘误：首轮虽记录 `chunked_greedy_equal=true`，但输入只有 32 tokens，脚本 chunk size 是 64，实际仍只有一块。真正的跨块证据来自后续 512-token 输入分成八个 64-token 块的实验。Day 0 smoke 不能提前承担它没有触发的验收。
 
@@ -271,9 +270,11 @@ Scheduler 通过 `Engine.forward_batch` 进入模型 `forward()`。模型维护 
 
 我们没有把这一步包装成已完成统一 Paged KV。当前 hybrid 路径的真实 KV 由模型动态追加，Engine 的 `kv_cache=None`，页表与页预算仍服务于调度和容量管理。当前路径限定 TP=1、page_size=1、naive prefix cache；只有 KV 相同而没有对应卷积/GDN state，不能恢复一个正确前缀。
 
-### 4.4 MTP 权重加载了，还需要写候选与提交过程
+### 4.4 Day 0 之后：单独接入 MTP 候选、验证与提交
 
-MTP 初版与模型一起接入。其网络先分别归一化下一位置的 token embedding 与上一位置的 hidden，再拼接，经 `[2560,5120]` 的 FC、一层独立 full-attention decoder、final norm 和共享 head 产生预测。当前控制器传入 target final norm 后的 `hidden_states`；这是一条明确的实现选择，完整数值对齐仍须回归。
+普通推理基线建立后，再扩展 MTP。虽然初版代码与模型集成在同一个提交里，这里需要单独实现和验收一条投机执行路径。它额外加载 15 个键：FC、两个输入 norm、一层含 11 个键的 Attention decoder、final norm；连同主干的 426 个键，得到历史加载记录中的 441。
+
+MTP 网络先分别归一化下一位置的 token embedding 与上一位置的 hidden，再拼接，经 `[2560,5120]` 的 FC、一层独立 full-attention decoder、final norm 和共享 head 产生预测。当前控制器传入 target final norm 后的 `hidden_states`；这是一条明确的实现选择，完整数值对齐仍须回归。
 
 Prefill priming 使用 `input_ids[1:]` 配 `target.hidden_states[:-1]`，MTP 的 `position_offset=1`，因此其状态长度比 target 少一。跨块时还要将上一块最后的 hidden 留给新块第一个 token，不能在每块各自做切片后丢掉边界配对。
 
