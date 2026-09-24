@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="850" height="1060" viewBox="0 0 850 1060" role="img" aria-labelledby="title desc">
+<title id="title">Qwen3.5-4B 文本网络与两类解码层</title><desc id="desc">主干由共享词嵌入、32个解码层、最终RMSNorm和绑定输出头构成；每四层为三个GDN和一个带输出门控的完整Attention，共24层GDN及8层Attention。下方分别展开两种pre-norm残差层。MTP绘为独立辅助分支，共享词嵌入和输出头，不是主干第33层。</desc>
+<style>text{font-family:Arial,"Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;fill:#29313a;font-size:16px}.title{font-size:21px;font-weight:600}.label{font-size:18px;font-weight:600}.small{font-size:15px;fill:#596574}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.box{fill:#fff;stroke:#73808d;stroke-width:1.3}.blue{fill:#eaf2f9;stroke:#2e608f;stroke-width:1.4}.orange{fill:#fff5e9;stroke:#b3793e;stroke-width:1.4}.panel{fill:#fff;stroke:#b3bdc6;stroke-width:1.2}.dash{fill:#fffaf5;stroke:#b3793e;stroke-width:1.4;stroke-dasharray:6 4}.arrow{fill:none;stroke:#5d6874;stroke-width:1.4;marker-end:url(#arrow)}.share{fill:none;stroke:#b3793e;stroke-width:1.4;stroke-dasharray:5 4;marker-end:url(#orangeArrow)}.line{fill:none;stroke:#5d6874;stroke-width:1.3}</style>
+<defs><marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#5d6874"/></marker><marker id="orangeArrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#b3793e"/></marker></defs>
+<rect width="850" height="1060" fill="white"/>
+<text x="24" y="33" class="title">Qwen3.5-4B：文本主干与层内结构</text>
+<text x="24" y="64" class="label">(a) 文本主干 · hidden size = 2560</text>
+<text x="267" y="94" class="small" text-anchor="middle">Token IDs</text>
+<path d="M267 100 V111" class="arrow"/>
+<rect x="24" y="116" width="486" height="57" rx="0" class="blue"/>
+<text x="267" y="140" class="label" text-anchor="middle">Token Embedding</text>
+<text x="267" y="161" class="mono" text-anchor="middle">E : 248320 × 2560</text>
+<path d="M267 174 V202" class="arrow"/>
+<rect x="24" y="208" width="486" height="87" rx="0" class="blue"/>
+<text x="267" y="234" class="label" text-anchor="middle">32 个 pre-norm residual decoder layers</text>
+<text x="267" y="261" text-anchor="middle">[ GDN × 3 → Gated Attention × 1 ] × 8</text>
+<text x="267" y="284" class="small" text-anchor="middle">24 层卷积 / 循环状态 + 8 层完整 KV</text>
+<path d="M267 296 V315 H128 V334" class="arrow"/>
+<rect x="24" y="340" width="209" height="52" rx="0" class="box"/>
+<text x="128" y="371" class="label" text-anchor="middle">Final RMSNorm</text>
+<path d="M234 366 H271" class="arrow"/>
+<rect x="278" y="340" width="232" height="52" rx="0" class="blue"/>
+<text x="394" y="362" class="label" text-anchor="middle">Tied LM Head</text>
+<text x="394" y="383" class="small" text-anchor="middle">logits = hidden · Eᵀ</text>
+<path d="M24 145 H12 V410 H394 V397" class="share"/>
+<text x="205" y="435" class="small" text-anchor="middle">Embedding / Head 共用一份权重</text>
+<rect x="551" y="90" width="275" height="345" rx="0" class="dash"/>
+<text x="688" y="118" class="label" text-anchor="middle">独立 MTP 预测分支</text>
+<text x="688" y="145" text-anchor="middle">输入：E(x[t+1]) 与 h[t]</text>
+<text x="688" y="168" class="small" text-anchor="middle">移位 token / 上一步 hidden</text>
+<rect x="571" y="186" width="235" height="58" rx="0" class="orange"/>
+<text x="688" y="210" text-anchor="middle">分别归一化 → 拼接 → FC</text>
+<text x="688" y="232" class="mono" text-anchor="middle">5120 → 2560</text>
+<path d="M688 245 V267" class="arrow"/>
+<rect x="571" y="273" width="235" height="58" rx="0" class="orange"/>
+<text x="688" y="297" text-anchor="middle">1 × Full Attention block</text>
+<text x="688" y="320" class="small" text-anchor="middle">独立 MTP state</text>
+<path d="M688 332 V353" class="arrow"/>
+<text x="688" y="377" text-anchor="middle">RMSNorm → 共享 LM Head</text>
+<text x="688" y="408" class="small" text-anchor="middle">辅助路径；不是主干第 33 层</text>
+<text x="24" y="470" class="label">(b) 两种层共享残差 / MLP 骨架，mixer 与状态不同</text>
+<rect x="24" y="490" width="386" height="508" rx="0" class="panel"/>
+<text x="217" y="519" class="label" text-anchor="middle">GDN decoder layer × 24</text>
+<text x="217" y="545" class="small" text-anchor="middle">状态：conv + recurrent</text>
+<text x="217" y="574" class="mono" text-anchor="middle">x  [T, 2560]</text>
+<path d="M217 581 V598" class="arrow"/>
+<rect x="92" y="604" width="250" height="42" rx="0" class="box"/>
+<text x="217" y="631" text-anchor="middle">RMSNorm</text>
+<path d="M217 647 V668" class="arrow"/>
+<rect x="72" y="674" width="290" height="60" rx="0" class="blue"/>
+<text x="217" y="698" class="label" text-anchor="middle">Gated DeltaNet</text>
+<text x="217" y="722" class="small" text-anchor="middle">因果卷积 → Gated Delta Rule</text>
+<path d="M217 735 V749" class="arrow"/>
+<circle cx="217" cy="770" r="15" fill="white" stroke="#5d6874" stroke-width="1.4"/>
+<text x="217" y="776" class="label" text-anchor="middle">+</text>
+<path d="M217 591 H46 V770 H196" class="arrow"/>
+<path d="M217 786 V811" class="arrow"/>
+<rect x="92" y="817" width="250" height="42" rx="0" class="box"/>
+<text x="217" y="844" text-anchor="middle">RMSNorm</text>
+<path d="M217 860 V879" class="arrow"/>
+<rect x="92" y="885" width="250" height="55" rx="0" class="blue"/>
+<text x="217" y="908" class="label" text-anchor="middle">SwiGLU MLP</text>
+<text x="217" y="930" class="mono small" text-anchor="middle">2560 → 9216 → 2560</text>
+<path d="M217 941 V948" class="arrow"/>
+<circle cx="217" cy="969" r="15" fill="white" stroke="#5d6874" stroke-width="1.4"/>
+<text x="217" y="975" class="label" text-anchor="middle">+</text>
+<path d="M217 798 H388 V969 H238" class="arrow"/>
+<path d="M217 985 V993" class="arrow"/>
+<rect x="440" y="490" width="386" height="508" rx="0" class="panel"/>
+<text x="633" y="519" class="label" text-anchor="middle">Attention decoder layer × 8</text>
+<text x="633" y="545" class="small" text-anchor="middle">状态：完整 K / V</text>
+<text x="633" y="574" class="mono" text-anchor="middle">x  [T, 2560]</text>
+<path d="M633 581 V598" class="arrow"/>
+<rect x="508" y="604" width="250" height="42" rx="0" class="box"/>
+<text x="633" y="631" text-anchor="middle">RMSNorm</text>
+<path d="M633 647 V668" class="arrow"/>
+<rect x="488" y="674" width="290" height="60" rx="0" class="blue"/>
+<text x="633" y="698" class="label" text-anchor="middle">Gated Full Attention</text>
+<text x="633" y="722" class="small" text-anchor="middle">Q/K norm + RoPE → Attention → gate</text>
+<path d="M633 735 V749" class="arrow"/>
+<circle cx="633" cy="770" r="15" fill="white" stroke="#5d6874" stroke-width="1.4"/>
+<text x="633" y="776" class="label" text-anchor="middle">+</text>
+<path d="M633 591 H462 V770 H612" class="arrow"/>
+<path d="M633 786 V811" class="arrow"/>
+<rect x="508" y="817" width="250" height="42" rx="0" class="box"/>
+<text x="633" y="844" text-anchor="middle">RMSNorm</text>
+<path d="M633 860 V879" class="arrow"/>
+<rect x="508" y="885" width="250" height="55" rx="0" class="blue"/>
+<text x="633" y="908" class="label" text-anchor="middle">SwiGLU MLP</text>
+<text x="633" y="930" class="mono small" text-anchor="middle">2560 → 9216 → 2560</text>
+<path d="M633 941 V948" class="arrow"/>
+<circle cx="633" cy="969" r="15" fill="white" stroke="#5d6874" stroke-width="1.4"/>
+<text x="633" y="975" class="label" text-anchor="middle">+</text>
+<path d="M633 798 H804 V969 H654" class="arrow"/>
+<path d="M633 985 V993" class="arrow"/>
+<text x="24" y="1027" class="small">实线：数据流 / 残差相加；橙色虚线：辅助路径或权重共享。</text>
+<text x="24" y="1050" class="small">4B 文本配置的机制示意；省略 batch 维度与算子内部细节，不表示性能测量。</text>
+</svg>

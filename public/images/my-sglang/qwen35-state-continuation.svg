@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="850" height="840" viewBox="0 0 850 840" role="img" aria-labelledby="title desc">
+<title id="title">Qwen3.5 请求状态的连续推进与槽位复用</title><desc id="desc">同一请求依次消费第一段prefill、第二段prefill与一个已输出但未被模型消费的pending token。每轮使用现有KV、卷积和循环状态，并按消费token数增加length。主干position_offset为0，位置从当前length开始；模型核对uid和cached_len，在请求结束后释放状态，槽复用必须使用新uid并创建空状态。</desc>
+<style>text{font-family:Arial,"Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;fill:#29313a;font-size:16px}.title{font-size:21px;font-weight:600}.label{font-size:18px;font-weight:600}.small{font-size:15px;fill:#596574}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.box{fill:#fff;stroke:#73808d;stroke-width:1.3}.blue{fill:#eaf2f9;stroke:#2e608f;stroke-width:1.4}.orange{fill:#fff5e9;stroke:#b3793e;stroke-width:1.4}.panel{fill:#fff;stroke:#b3bdc6;stroke-width:1.2}.dash{fill:#fffaf5;stroke:#b3793e;stroke-width:1.4;stroke-dasharray:6 4}.arrow{fill:none;stroke:#5d6874;stroke-width:1.4;marker-end:url(#arrow)}.share{fill:none;stroke:#b3793e;stroke-width:1.4;stroke-dasharray:5 4;marker-end:url(#orangeArrow)}.line{fill:none;stroke:#5d6874;stroke-width:1.3}</style>
+<defs><marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#5d6874"/></marker><marker id="orangeArrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#b3793e"/></marker></defs>
+<rect width="850" height="840" fill="white"/>
+<text x="24" y="33" class="title">同一请求：消费区间、位置与状态连续性</text>
+<text x="24" y="62" class="small">普通文本路径：position_offset = 0；令 L = c + d。区间均为左闭右开。</text>
+<rect x="24" y="87" width="250" height="133" rx="0" class="blue"/>
+<text x="149" y="116" class="label" text-anchor="middle">Prefill · chunk 1</text>
+<text x="149" y="146" text-anchor="middle">输入 token [0, c)</text>
+<text x="149" y="174" class="mono small" text-anchor="middle">positions = [0, c)</text>
+<text x="149" y="201" class="small" text-anchor="middle">消费前 length = 0</text>
+<path d="M149 221 V264" class="arrow"/>
+<rect x="300" y="87" width="250" height="133" rx="0" class="blue"/>
+<text x="425" y="116" class="label" text-anchor="middle">Prefill · chunk 2</text>
+<text x="425" y="146" text-anchor="middle">输入 token [c, L)</text>
+<text x="425" y="174" class="mono small" text-anchor="middle">positions = [c, L)</text>
+<text x="425" y="201" class="small" text-anchor="middle">消费前 length = c</text>
+<path d="M425 221 V264" class="arrow"/>
+<rect x="576" y="87" width="250" height="133" rx="0" class="blue"/>
+<text x="701" y="116" class="label" text-anchor="middle">Decode · pending</text>
+<text x="701" y="146" text-anchor="middle">输入 token x[L]</text>
+<text x="701" y="174" class="mono small" text-anchor="middle">position = L</text>
+<text x="701" y="201" class="small" text-anchor="middle">消费前 length = L</text>
+<path d="M701 221 V264" class="arrow"/>
+<path d="M275 155 H293" class="arrow"/>
+<path d="M551 155 H569" class="arrow"/>
+<rect x="24" y="271" width="250" height="208" rx="0" class="box"/>
+<text x="149" y="300" class="label" text-anchor="middle">length = c</text>
+<path d="M37 314 H261" class="line"/>
+<text x="40" y="341" class="label">KV · 8 层</text>
+<text x="40" y="365" class="small">历史区间 [0, c)</text>
+<text x="40" y="396" class="label">conv · 24 层</text>
+<text x="40" y="419" class="small">最近 W 个卷积前输入</text>
+<text x="40" y="450">recurrent · 24 层 · FP32</text>
+<rect x="300" y="271" width="250" height="208" rx="0" class="box"/>
+<text x="425" y="300" class="label" text-anchor="middle">length = L</text>
+<path d="M313 314 H537" class="line"/>
+<text x="316" y="341" class="label">KV · 8 层</text>
+<text x="316" y="365" class="small">历史区间 [0, L)</text>
+<text x="316" y="396" class="label">conv · 24 层</text>
+<text x="316" y="419" class="small">最近 W 个卷积前输入</text>
+<text x="316" y="450">recurrent · 24 层 · FP32</text>
+<rect x="576" y="271" width="250" height="208" rx="0" class="box"/>
+<text x="701" y="300" class="label" text-anchor="middle">length = L + 1</text>
+<path d="M589 314 H813" class="line"/>
+<text x="592" y="341" class="label">KV · 8 层</text>
+<text x="592" y="365" class="small">历史区间 [0, L+1)</text>
+<text x="592" y="396" class="label">conv · 24 层</text>
+<text x="592" y="419" class="small">最近 W 个卷积前输入</text>
+<text x="592" y="450">recurrent · 24 层 · FP32</text>
+<path d="M275 383 H293" class="arrow"/>
+<path d="M551 383 H569" class="arrow"/>
+<rect x="24" y="501" width="802" height="79" rx="0" class="orange"/>
+<text x="42" y="530">pending 的边界：prefill 完成后输出 x[L]，状态仍只消费到 L。</text>
+<text x="42" y="557">下一轮 decode 消费 x[L] 后 length = L+1，再输出 x[L+1]；输出 ≠ 已入状态。</text>
+<text x="24" y="616" class="label">请求身份与回收：同一个 table_idx 可以复用，旧状态不能复用</text>
+<rect x="24" y="637" width="250" height="98" rx="0" class="blue"/>
+<text x="149" y="665" class="label" text-anchor="middle">运行前守卫</text>
+<text x="149" y="692" class="mono small" text-anchor="middle">stored_uid == req.uid</text>
+<text x="149" y="718" class="mono small" text-anchor="middle">state.length == cached_len</text>
+<path d="M275 686 H293" class="arrow"/>
+<rect x="300" y="637" width="250" height="98" rx="0" class="box"/>
+<text x="425" y="665" class="label" text-anchor="middle">结束 / 取消</text>
+<text x="425" y="692" text-anchor="middle">处理在途执行依赖</text>
+<text x="425" y="718" class="mono small" text-anchor="middle">release_request(slot, uid)</text>
+<path d="M551 686 H569" class="arrow"/>
+<rect x="576" y="637" width="250" height="98" rx="0" class="orange"/>
+<text x="701" y="665" class="label" text-anchor="middle">槽位交给新请求</text>
+<text x="701" y="692" text-anchor="middle">新 uid + cached_len = 0</text>
+<text x="701" y="718" text-anchor="middle">创建空状态，length = 0</text>
+<text x="24" y="768" class="mono small">状态归属：_request_states[table_idx] = (uid, Qwen35State)</text>
+<text x="24" y="796" class="small">蓝框：消费 / 活动状态；橙框：输出边界或身份变化；箭头表示逻辑推进，不是时间比例。</text>
+<text x="24" y="824" class="small">机制示意，非测量；此处为请求独立的动态 KV 路径，不表示已接入 Paged KV / Prefix Cache。</text>
+</svg>
