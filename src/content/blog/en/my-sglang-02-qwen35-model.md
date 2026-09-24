@@ -5,7 +5,7 @@ date: 2026-09-24T00:00:00Z
 lang: en
 translationKey: my-sglang-02-qwen35-model
 tags: [LLM Inference, Model Integration, Qwen3.5, My_Sglang]
-draft: true
+draft: false
 ---
 
 Adding support for a new model to an inference framework usually has a small entry point: add a class name to the registry. Once implementation begins, however, more concrete questions quickly arise: can the weights map directly to existing layers, which historical states must the model retain, where does the second forward pass resume, and do the framework's existing scheduling and caching assumptions still hold?

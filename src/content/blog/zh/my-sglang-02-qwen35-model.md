@@ -5,7 +5,7 @@ date: 2026-09-24T00:00:00Z
 lang: zh
 translationKey: my-sglang-02-qwen35-model
 tags: [LLM 推理, 模型适配, Qwen3.5, My_Sglang]
-draft: true
+draft: false
 ---
 
 给一个推理框架增加新模型支持，入口通常很小：在注册表里加一个类名。但真正开始做的时候，很快就会遇到更具体的问题：权重能否直接映射到已有层，模型需要保存哪些历史状态，第二次 forward 从哪里继续，以及框架原来的调度与缓存假设是否仍然成立。
