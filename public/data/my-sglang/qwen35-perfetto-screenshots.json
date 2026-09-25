@@ -1,0 +1,35 @@
+{
+  "captured_on": "2026-09-25",
+  "trace_recorded_on": "2026-09-23",
+  "method": "Perfetto v58.3; Chrome DevTools Capture screenshot; page viewport only; no image editing",
+  "privacy": "Only Perfetto webpage pixels; excludes browser tabs, address bar, bookmarks, desktop and other apps.",
+  "files": [
+    {
+      "file": "perfetto-baseline.png",
+      "sha256": "8c963cd979f2810d319ca11c8fcb81b3e29cc5e90122d6ff4af6c1353cfa086f",
+      "width": 2880,
+      "height": 2000,
+      "trace_archive_relative_path": "02-model/smoke/decode_trace.json",
+      "trace_sha256": "aaefe3d3c63c8cac3be2ecdb4af86ef93f3faaec9461da998919d949a2399c9a",
+      "public_url": "/images/my-sglang/qwen35-report/perfetto-baseline.png"
+    },
+    {
+      "file": "perfetto-decode.png",
+      "sha256": "66a73fb0340fc6198df6edef83bfe3b53303b6d5535daee70b8c7a7d80cc99f1",
+      "width": 2880,
+      "height": 1240,
+      "trace_archive_relative_path": "05-gdn/model-triton/decode_trace.json",
+      "trace_sha256": "f09fc28a13d6de22075b6ab79f48733e1923fcece94886e4002498ab67648de9",
+      "public_url": "/images/my-sglang/qwen35-report/perfetto-decode.png"
+    },
+    {
+      "file": "perfetto-kernel.png",
+      "sha256": "bd5ce2408cd7c25413c1c517b47c5df9e7e2a2764a8797ee13b0d8239f4283e3",
+      "width": 2880,
+      "height": 2000,
+      "trace_archive_relative_path": "05-gdn/model-triton/decode_trace.json",
+      "trace_sha256": "f09fc28a13d6de22075b6ab79f48733e1923fcece94886e4002498ab67648de9",
+      "public_url": "/images/my-sglang/qwen35-report/perfetto-kernel.png"
+    }
+  ]
+}

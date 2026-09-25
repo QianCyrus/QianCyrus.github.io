@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="850" height="830" viewBox="0 0 850 830" role="img" aria-labelledby="title desc">
+<title id="title">Qwen3.5-4B：混合主干与请求独立状态</title><desc id="desc">32层文本主干重复三层GDN与一层完整Attention八次。24层GDN保留固定形状的卷积窗口及FP32循环矩阵；8层Attention保存增长的KV历史。输入token打包后共用各层投影，涉及状态的计算再按请求分段，各请求的KV、卷积窗口和循环矩阵互相隔离。</desc>
+<style>text{font-family:"Comic Sans MS","Chalkboard","Bradley Hand","Kaiti SC","STKaiti","KaiTi","PingFang SC","Microsoft YaHei",sans-serif;font-size:18px;fill:#242424}.title{font-size:24px;font-weight:600}.label{font-size:21px}.small{font-size:16px;fill:#626262}.mono{font-family:"Comic Sans MS","Chalkboard","PingFang SC",sans-serif}.blue{fill:#1976d2}.green{fill:#2a9d48}.orange{fill:#c2760a}.red{fill:#cf514b}path{stroke-linecap:round;stroke-linejoin:round}</style>
+<defs><pattern id="hatchGreen" patternUnits="userSpaceOnUse" width="11" height="11" patternTransform="rotate(35)"><path d="M0 0 V11" stroke="#acd8b8" stroke-width="1.2" /></pattern><pattern id="hatchBlue" patternUnits="userSpaceOnUse" width="11" height="11" patternTransform="rotate(35)"><path d="M0 0 V11" stroke="#abd3ed" stroke-width="1.2" /></pattern></defs>
+<rect width="850" height="830" fill="white" />
+<text x="30" y="38" class="title">先看模型差异：哪些层，哪些状态？</text>
+<text x="30" y="68" class="small">Qwen3.5-4B · 文本主干 hidden = 2560</text>
+<path d="M50 113 C86.0 110.3 145.2 113.9 172 112.3 Q190.9 111 191 130 C189.2 155.7 191.2 178.5 189.7 189 Q191 207.8 172 207.5 C140.39999999999998 205.9 79.6 208.5 48 206.9 Q28.6 207.3 30.2 189 C31.4 176.60000000000002 29 149.05 30.1 130 Q29 112.8 50 113 Z" fill="white" stroke="#242424" stroke-width="1.9" />
+<text x="110" y="147" class="label" text-anchor="middle">Embedding</text>
+<text x="110" y="179" class="small" text-anchor="middle">248320 × 2560</text>
+<path d="M192 157 Q208 155 230 157" fill="none" stroke="#242424" stroke-width="1.85" />
+<path d="M218 152 L230 157 L217 163" fill="none" stroke="#242424" stroke-width="1.75" />
+<path d="M258 105 C360.5 102.3 490.0 105.9 570 104.3 Q588.9 103 589 122 C587.2 157.36 589.2 185.2 587.7 202 Q589 220.8 570 220.5 C479.5 218.9 346.5 221.5 256 219.9 Q236.6 220.3 238.2 202 C239.4 182.88 237 149.24 238.1 122 Q237 104.8 258 105 Z" fill="white" stroke="#242424" stroke-width="1.9" />
+<text x="413" y="136" class="label" text-anchor="middle">32 layers</text>
+<text x="413" y="169" text-anchor="middle">[ GDN × 3 → Attention × 1 ] × 8</text>
+<text x="413" y="200" class="small" text-anchor="middle">按 layer_types 选择 mixer</text>
+<path d="M590 157 Q612 160 640 156" fill="none" stroke="#242424" stroke-width="1.85" />
+<path d="M628 151 L640 156 L627 162" fill="none" stroke="#242424" stroke-width="1.75" />
+<path d="M668 113 C707.85 110.3 771.12 113.9 801 112.3 Q819.9 111 820 130 C818.2 155.7 820.2 178.5 818.7 189 Q820 207.8 801 207.5 C765.99 205.9 701.01 208.5 666 206.9 Q646.6 207.3 648.2 189 C649.4 176.60000000000002 647 149.05 648.1 130 Q647 112.8 668 113 Z" fill="white" stroke="#242424" stroke-width="1.9" />
+<text x="733" y="144" text-anchor="middle">Final RMSNorm</text>
+<text x="733" y="176" class="label" text-anchor="middle">→ tied head</text>
+<text x="733" y="238" class="small orange" text-anchor="middle">与 Embedding 共用 E</text>
+<path d="M413 223 C411 253 205 252 211 292" fill="none" stroke="#2a9d48" stroke-width="1.85" />
+<path d="M205 280 L211 292 L216 279" fill="none" stroke="#2a9d48" stroke-width="1.75" />
+<path d="M413 223 C415 253 633 253 634 292" fill="none" stroke="#1976d2" stroke-width="1.85" />
+<path d="M628 280 L634 292 L639 279" fill="none" stroke="#1976d2" stroke-width="1.75" />
+<path d="M55 302 C165.9 299.3 304.28 302.9 391 301.3 Q409.9 300 410 319 C408.2 381.5 410.2 423.5 408.7 458 Q410 476.8 391 476.5 C293.06 474.9 150.94 477.5 53 475.9 Q33.6 476.3 35.2 458 C36.4 420.0 34 369.25 35.1 319 Q34 301.8 55 302 Z" fill="white" stroke="#2a9d48" stroke-width="1.9" />
+<path d="M462 302 C572.9 299.3 711.28 302.9 798 301.3 Q816.9 300 817 319 C815.2 381.5 817.2 423.5 815.7 458 Q817 476.8 798 476.5 C700.06 474.9 557.94 477.5 460 475.9 Q440.6 476.3 442.2 458 C443.4 420.0 441 369.25 442.1 319 Q441 301.8 462 302 Z" fill="white" stroke="#1976d2" stroke-width="1.9" />
+<text x="222" y="333" class="label green" text-anchor="middle">24 × GDN</text>
+<text x="629" y="333" class="label blue" text-anchor="middle">8 × Gated Attention</text>
+<text x="222" y="366" text-anchor="middle">Conv → delta rule → gated norm</text>
+<text x="629" y="366" text-anchor="middle">Q/K norm + RoPE → SDPA → gate</text>
+<path d="M72 387 C172.8 384.3 294.15999999999997 387.9 374 386.3 Q386.9 385 387 398 C385.2 417.74 387.2 434.3 385.7 443 Q387 455.8 374 455.5 C284.32 453.9 159.68 456.5 70 454.9 Q56.6 455.3 58.2 443 C59.4 432.92 57 412.91 58.1 398 Q57 386.8 72 387 Z" fill="#f7fcf7" stroke="#2a9d48" stroke-width="1.9" />
+<path d="M72 387 C172.8 384.3 294.15999999999997 387.9 374 386.3 Q386.9 385 387 398 C385.2 417.74 387.2 434.3 385.7 443 Q387 455.8 374 455.5 C284.32 453.9 159.68 456.5 70 454.9 Q56.6 455.3 58.2 443 C59.4 432.92 57 412.91 58.1 398 Q57 386.8 72 387 Z" fill="url(#hatchGreen)" stroke="#2a9d48" stroke-width="1.9" />
+<path d="M479 387 C579.8 384.3 701.16 387.9 781 386.3 Q793.9 385 794 398 C792.2 417.74 794.2 434.3 792.7 443 Q794 455.8 781 455.5 C691.3199999999999 453.9 566.68 456.5 477 454.9 Q463.6 455.3 465.2 443 C466.4 432.92 464 412.91 465.1 398 Q464 386.8 479 387 Z" fill="#f8fbfe" stroke="#1976d2" stroke-width="1.9" />
+<path d="M479 387 C579.8 384.3 701.16 387.9 781 386.3 Q793.9 385 794 398 C792.2 417.74 794.2 434.3 792.7 443 Q794 455.8 781 455.5 C691.3199999999999 453.9 566.68 456.5 477 454.9 Q463.6 455.3 465.2 443 C466.4 432.92 464 412.91 465.1 398 Q464 386.8 479 387 Z" fill="url(#hatchBlue)" stroke="#1976d2" stroke-width="1.9" />
+<text x="222" y="414" text-anchor="middle">conv 窗口 + FP32 recurrent</text>
+<text x="222" y="442" class="small" text-anchor="middle">状态尺寸不随已读 token 数增长</text>
+<text x="629" y="414" text-anchor="middle">完整 K / V 历史</text>
+<text x="629" y="442" class="small" text-anchor="middle">沿序列长度增长</text>
+<text x="425" y="511" text-anchor="middle">两类层均为 pre-norm residual block</text>
+<text x="425" y="539" text-anchor="middle">MLP：2560 → 9216 → 2560</text>
+<text x="425" y="584" text-anchor="middle" class="label">批内共用投影，状态按请求隔离</text><rect x="35" y="604" width="205" height="61" rx="10" fill="white" stroke="#1976d2" stroke-width="1.8" /><text x="137" y="629" text-anchor="middle" class="">Packed tokens</text><text x="137" y="653" text-anchor="middle" class="small">[ A tokens | B tokens ]</text><rect x="304" y="604" width="239" height="61" rx="10" fill="white" stroke="#1976d2" stroke-width="1.8" /><text x="424" y="629" text-anchor="middle" class="">各层的共享投影</text><text x="424" y="653" text-anchor="middle" class="small">对 packed rows 计算</text><rect x="607" y="604" width="208" height="61" rx="10" fill="white" stroke="#2a9d48" stroke-width="1.8" /><text x="711" y="629" text-anchor="middle" class="">按 lengths 分段</text><text x="711" y="653" text-anchor="middle" class="small">stateful mixer</text><path d="M245 635 H295" fill="none" stroke="#242424" stroke-width="1.8" /><path d="M285 630 L295 635 L285 640" fill="none" stroke="#242424" stroke-width="1.8" /><path d="M548 635 H598" fill="none" stroke="#242424" stroke-width="1.8" /><path d="M588 630 L598 635 L588 640" fill="none" stroke="#242424" stroke-width="1.8" /><path d="M711 670 V692 H222 V710" fill="none" stroke="#2a9d48" stroke-width="1.8" /><path d="M711 692 H629 V710" fill="none" stroke="#1976d2" stroke-width="1.8" /><path d="M217 700 L222 710 L227 700" fill="none" stroke="#2a9d48" stroke-width="1.8" /><path d="M624 700 L629 710 L634 700" fill="none" stroke="#1976d2" stroke-width="1.8" /><rect x="35" y="715" width="375" height="67" rx="10" fill="white" stroke="#2a9d48" stroke-width="1.8" /><text x="222" y="741" text-anchor="middle" class="" style="fill:#2a9d48">请求 A</text><text x="222" y="768" text-anchor="middle" class="small">KVA  ·  ConvA  ·  SA</text><rect x="442" y="715" width="375" height="67" rx="10" fill="white" stroke="#1976d2" stroke-width="1.8" /><text x="629" y="741" text-anchor="middle" class="" style="fill:#1976d2">请求 B</text><text x="629" y="768" text-anchor="middle" class="small">KVB  ·  ConvB  ·  SB</text><text x="425" y="812" text-anchor="middle" class="small">机制示意：动态 KV 按 token 增长；Conv 与 recurrent 状态固定大小。</text></svg>
