@@ -1,0 +1,120 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="960" viewBox="0 0 1600 960" role="img" aria-labelledby="title desc">
+  <title id="title">My_Sglang 单节点 PD 架构：两组 TP4 与四对 KV 传输通道</title>
+  <desc id="desc">八张 GPU 分为 Prefill GPU 0 到 3 和 Decode GPU 4 到 7。客户端经过轻量 HTTP 代理进入 Decode。Decode 分配本地 KV 页后通过 ZMQ 请求 Prefill。READY 和 START 协商后，四对对应 TP rank 通过独立的两 rank NCCL communicator 传输整个 prompt 的 KV。Decode 等待全部 rank 接收完成，将逻辑 token 映射至自己的页，提交首 token 后进入解码，并返回 ACK。Prefill 收到 ACK 并等本地发送依赖完成后回收源页。在途取消先排空传输再释放资源。本图不表示逐层流水或性能结果。</desc>
+  <defs>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L10 5 L0 10 Z" fill="#35689b"/></marker>
+    <marker id="arrow-orange" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L11 5.5 L0 11 Z" fill="#c57525"/></marker>
+    <style>
+      text { font-family: Arial, "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #253443; }
+      .title { font-size: 31px; font-weight: 700; }
+      .subtitle { font-size: 18px; fill: #61717f; }
+      .label { font-size: 21px; font-weight: 600; }
+      .body { font-size: 18px; }
+      .small { font-size: 16px; fill: #5b6b7a; }
+      .group-title { font-size: 24px; font-weight: 700; }
+      .orange { fill: #a9611e; }
+      .blue { fill: #35689b; }
+      .engine { fill: #edf4fa; stroke: #688bae; stroke-width: 1.6; }
+      .gpu { fill: #f5f8fc; stroke: #8ca5bd; stroke-width: 1.4; }
+      .group { fill: #fff; stroke: #d7dfe5; stroke-width: 1.6; }
+      .transfer { fill: none; stroke: #c57525; stroke-width: 2.4; marker-end: url(#arrow-orange); }
+      .normal-flow { fill: none; stroke: #35689b; stroke-width: 2.2; marker-end: url(#arrow-blue); }
+      .rule { stroke: #e2e7eb; stroke-width: 1; }
+    </style>
+  </defs>
+  <rect width="1600" height="960" fill="#fff"/>
+
+  <text x="60" y="62" class="title">单节点 PD：两组 TP4，四对 KV 通道</text>
+  <text x="60" y="97" class="subtitle">标准 dense Attention · 8 GPUs · Prefill / Decode 分离</text>
+  <rect x="1125" y="52" width="20" height="15" rx="2" fill="#edf4fa" stroke="#688bae"/>
+  <text x="1156" y="66" class="small">复用原引擎</text>
+  <path d="M1320 60 H1351" class="transfer"/>
+  <text x="1364" y="66" class="small">PD 交接</text>
+  <line x1="60" y1="117" x2="1540" y2="117" class="rule"/>
+
+  <rect x="90" y="150" width="260" height="66" rx="6" class="engine"/>
+  <text x="220" y="179" text-anchor="middle" class="label">客户端</text>
+  <text x="220" y="202" text-anchor="middle" class="small">HTTP / SSE</text>
+  <path d="M352 183 H467" class="normal-flow"/>
+  <rect x="470" y="150" width="300" height="66" rx="6" class="engine"/>
+  <text x="620" y="179" text-anchor="middle" class="label">轻量 HTTP 代理</text>
+  <text x="620" y="202" text-anchor="middle" class="small">生成请求 → D</text>
+  <path d="M772 183 H1127" class="normal-flow"/>
+  <text x="950" y="169" text-anchor="middle" class="small">请求进入 / SSE 原路返回</text>
+  <rect x="1130" y="150" width="320" height="66" rx="6" class="engine"/>
+  <text x="1290" y="179" text-anchor="middle" class="label">D 服务入口</text>
+  <text x="1290" y="202" text-anchor="middle" class="small">准入 · 分配本地 KV 页</text>
+  <path d="M1290 217 V311" class="normal-flow"/>
+
+  <path d="M1120 315 V265 H390 V311" class="transfer"/>
+  <text x="765" y="248" text-anchor="middle" class="body orange">① D → P：REQUEST / CANCEL · ZMQ</text>
+  <text x="765" y="290" text-anchor="middle" class="small">READY 返回首 token 与长度；START 后开始传输</text>
+
+  <rect x="60" y="315" width="660" height="449" rx="8" class="group"/>
+  <rect x="880" y="315" width="660" height="449" rx="8" class="group"/>
+  <path d="M68 315 H712 Q720 315 720 323 V365 H60 V323 Q60 315 68 315" fill="#fbf2e8"/>
+  <path d="M888 315 H1532 Q1540 315 1540 323 V365 H880 V323 Q880 315 888 315" fill="#fbf2e8"/>
+  <text x="86" y="348" class="group-title">P · Prefill</text>
+  <text x="692" y="348" text-anchor="end" class="body">GPU 0–3 · TP4</text>
+  <text x="906" y="348" class="group-title">D · Decode</text>
+  <text x="1512" y="348" text-anchor="end" class="body">GPU 4–7 · TP4</text>
+
+  <rect x="90" y="387" width="600" height="66" rx="5" class="engine"/>
+  <text x="390" y="414" text-anchor="middle" class="label">Prefill → 首 token + 源 KV</text>
+  <text x="390" y="438" text-anchor="middle" class="small">源页保持占用，等待 ACK</text>
+  <rect x="910" y="387" width="600" height="66" rx="5" class="engine"/>
+  <text x="1210" y="414" text-anchor="middle" class="label">等待 KV → Decode</text>
+  <text x="1210" y="438" text-anchor="middle" class="small">等待期间不解码；P / D 页号可以不同</text>
+
+  <text x="800" y="476" text-anchor="middle" class="body orange">② Whole-prompt KV</text>
+
+  <rect x="105" y="493" width="550" height="42" rx="4" class="gpu"/>
+  <text x="380" y="520" text-anchor="middle" class="body blue">GPU 0 · TP rank 0</text>
+  <rect x="945" y="493" width="550" height="42" rx="4" class="gpu"/>
+  <text x="1220" y="520" text-anchor="middle" class="body blue">GPU 4 · TP rank 0</text>
+  <path d="M657 514 H940" class="transfer"/>
+  <rect x="740" y="501" width="120" height="26" fill="#fff"/>
+  <text x="800" y="520" text-anchor="middle" class="small orange">NCCL pair 0</text>
+
+  <rect x="105" y="549" width="550" height="42" rx="4" class="gpu"/>
+  <text x="380" y="576" text-anchor="middle" class="body blue">GPU 1 · TP rank 1</text>
+  <rect x="945" y="549" width="550" height="42" rx="4" class="gpu"/>
+  <text x="1220" y="576" text-anchor="middle" class="body blue">GPU 5 · TP rank 1</text>
+  <path d="M657 570 H940" class="transfer"/>
+  <rect x="740" y="557" width="120" height="26" fill="#fff"/>
+  <text x="800" y="576" text-anchor="middle" class="small orange">NCCL pair 1</text>
+
+  <rect x="105" y="605" width="550" height="42" rx="4" class="gpu"/>
+  <text x="380" y="632" text-anchor="middle" class="body blue">GPU 2 · TP rank 2</text>
+  <rect x="945" y="605" width="550" height="42" rx="4" class="gpu"/>
+  <text x="1220" y="632" text-anchor="middle" class="body blue">GPU 6 · TP rank 2</text>
+  <path d="M657 626 H940" class="transfer"/>
+  <rect x="740" y="613" width="120" height="26" fill="#fff"/>
+  <text x="800" y="632" text-anchor="middle" class="small orange">NCCL pair 2</text>
+
+  <rect x="105" y="661" width="550" height="42" rx="4" class="gpu"/>
+  <text x="380" y="688" text-anchor="middle" class="body blue">GPU 3 · TP rank 3</text>
+  <rect x="945" y="661" width="550" height="42" rx="4" class="gpu"/>
+  <text x="1220" y="688" text-anchor="middle" class="body blue">GPU 7 · TP rank 3</text>
+  <path d="M657 682 H940" class="transfer"/>
+  <rect x="740" y="669" width="120" height="26" fill="#fff"/>
+  <text x="800" y="688" text-anchor="middle" class="small orange">NCCL pair 3</text>
+
+  <text x="390" y="740" text-anchor="middle" class="body">gather：按逻辑 token 打包</text>
+  <text x="1210" y="740" text-anchor="middle" class="body">scatter：写入 D 的本地页映射</text>
+  <path d="M1210 766 V804" class="normal-flow"/>
+
+  <rect x="945" y="809" width="550" height="72" rx="6" fill="#fbf2e8" stroke="#c57525" stroke-width="1.6"/>
+  <text x="1220" y="838" text-anchor="middle" class="label">③ 全部 rank 收完 → scatter</text>
+  <text x="1220" y="863" text-anchor="middle" class="body">提交首 token，再进入 Decode</text>
+  <rect x="105" y="809" width="550" height="72" rx="6" fill="#fbf2e8" stroke="#c57525" stroke-width="1.6"/>
+  <text x="380" y="838" text-anchor="middle" class="label">④ ACK 后回收源页</text>
+  <text x="380" y="863" text-anchor="middle" class="body">并等待本地 send 依赖完成</text>
+  <path d="M943 845 H660" class="transfer"/>
+  <rect x="765" y="830" width="70" height="27" fill="#fff"/>
+  <text x="800" y="850" text-anchor="middle" class="body orange">ACK</text>
+
+  <line x1="60" y1="909" x2="1540" y2="909" class="rule"/>
+  <text x="60" y="937" class="small">生命周期边界：整段 KV 就绪后解码；在途取消先排空传输，再释放资源。</text>
+  <text x="1540" y="937" text-anchor="end" class="small">4 个独立两 rank 通道 · 与 TP communicator 分开</text>
+</svg>
